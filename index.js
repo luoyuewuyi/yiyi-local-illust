@@ -465,7 +465,7 @@
 
   async function resolveStudioUrl() {
     const s = getSettings();
-    const policy = s.backendPolicy || 'auto';
+    const policy = s.backendPolicy || 'mac';
     let firstErr = null;
 
     if (policy !== 'mac') {
@@ -488,7 +488,7 @@
       firstErr = localRes || remoteRes;
       if (policy === 'windows') {
         activeStudioUrl = null;
-        activeEndpointMode = 'offline';
+        activeEndpointMode = firstErr?.status === 401 ? 'auth_error' : 'offline';
         activeBusy = false;
         updateConnectionUi();
         return firstErr || null;
@@ -504,11 +504,11 @@
         updateConnectionUi();
         return macRes;
       }
-      if (!firstErr) firstErr = macRes;
+      if (!firstErr || macRes?.status === 401) firstErr = macRes;
     }
 
     activeStudioUrl = null;
-    activeEndpointMode = 'offline';
+    activeEndpointMode = firstErr?.status === 401 ? 'auth_error' : 'offline';
     activeBusy = false;
     updateConnectionUi();
     return firstErr || null;
@@ -539,6 +539,8 @@
         statusText.textContent = `🟢 远程 4060 在线 (${activeStudioUrl})`;
       } else if (activeEndpointMode === 'mac') {
         statusText.textContent = `🟢 Mac 24h 极速在线 (${s.macUrl || '/yiyi-mac'})`;
+      } else if (activeEndpointMode === 'auth_error') {
+        statusText.textContent = '🔒 需要输入正确的配置密码';
       } else {
         statusText.textContent = '⚪ 生图服务未连接';
       }
@@ -929,8 +931,8 @@
           <input type="text" id="yiyi-opt-remote-url" />
         </div>
         <div class="yiyi-field">
-          <label>访问密码 Token（若电脑端未设置则留空）</label>
-          <input type="password" id="yiyi-opt-token" placeholder="留空表示免密" />
+          <label>配置访问密码（服务已设密时必填）</label>
+          <input type="password" id="yiyi-opt-token" placeholder="请输入配置密码" />
         </div>
       </div>
     `;
@@ -996,6 +998,8 @@
             ? 'Windows 远程 4060'
             : 'Mac 24h 极速';
         toastInfo(`连接成功 (${modeLabel})`, 'success');
+      } else if (res?.status === 401) {
+        toastInfo('配置密码未填或不正确，请在下方输入框填写密码', 'error');
       } else {
         toastInfo('暂未连上生图服务，请检查网络与服务状态', 'warning');
       }
@@ -1038,7 +1042,7 @@
     bindVal('yiyi-opt-mac-url', 'macUrl', false, true);
     bindVal('yiyi-opt-local-url', 'localUrl', false, true);
     bindVal('yiyi-opt-remote-url', 'remoteUrl', false, true);
-    bindVal('yiyi-opt-token', 'token');
+    bindVal('yiyi-opt-token', 'token', false, true);
 
     syncPanelFromSettings();
   }
