@@ -15,13 +15,15 @@
     skipFirstMessage: true,
     silentOffline: true,
     autoWorldLore: true,
+    memoryMode: 'smart', // 'smart' | 'story_only' | 'off'
     stylePrefix: '',
     fabPos: null,
   };
 
   let activeStudioUrl = null;
-  let activeEndpointMode = 'offline'; // 'local' | 'remote' | 'offline'
+  let activeEndpointMode = 'offline'; // 'local' | 'remote' | 'mac' | 'auth_error' | ... | 'offline'
   let activeBusy = false;
+  let lastConnError = null;
   const pendingAutoIds = new Set();
   const runningFloorIds = new Set();
 
@@ -32,11 +34,12 @@
   function getSettings() {
     const ctx = getCtx();
     if (!ctx) return { ...DEFAULTS };
-    ctx.extensionSettings[EXT_KEY] = Object.assign(
-      {},
-      DEFAULTS,
-      ctx.extensionSettings[EXT_KEY] || {},
-    );
+    const raw = ctx.extensionSettings[EXT_KEY] || {};
+    const merged = Object.assign({}, DEFAULTS, raw);
+    if (raw.memoryMode == null && raw.autoWorldLore === false) {
+      merged.memoryMode = 'off';
+    }
+    ctx.extensionSettings[EXT_KEY] = merged;
     return ctx.extensionSettings[EXT_KEY];
   }
 
@@ -65,8 +68,8 @@
       }
     }
     s = s
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/<(?:style|script|details)[^>]*>[\s\S]*?<\/(?:style|script|details)>/gi, '')
+      .replace(/<(?:think|thinking|thought)>[\s\S]*?<\/(?:think|thinking|thought)>/gi, '')
+      .replace(/<(?:style|script|details|UpdateVariable|Variable|statusbar|status|options|choices)[^>]*>[\s\S]*?<\/(?:style|script|details|UpdateVariable|Variable|statusbar|status|options|choices)>/gi, '')
       .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/<br\s*\/?>|<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
       .replace(/<[^>]+>/g, '')
@@ -102,18 +105,33 @@
     return 0;
   }
 
-  function collectVariableVisualHints(obj, out, depth = 0) {
-    if (!obj || typeof obj !== 'object' || depth > 2 || out.length >= 6) return;
-    const visKeyRe = /(外貌|长相|特征|衣着|服[装饰]|穿[着戴]|发型|瞳色|身[材高]|肤色|配饰|地点|位置|场景|appearance|cloth|outfit|hair|eye|location)/i;
-    for (const [k, v] of Object.entries(obj)) {
-      if (out.length >= 6) break;
-      if (typeof v === 'string' || typeof v === 'number') {
-        const vs = String(v).trim();
-        if (vs && vs.length <= 140 && visKeyRe.test(k)) {
-          out.push(`${k}: ${cleanFloorForDistill(vs, false)}`);
+  const VIS_KEY_RE = /(外貌|长相|容貌|特征|衣着|穿[着戴]|服[装饰]|装扮|裙|裤|发[色型]|瞳[色眸]|眸色|肤色|身[材高体]|配饰|首饰|手持|地点|位置|场景|环境|所在|天气|时间|情绪|心情|状态|伤[势痕]|appearance|look|outfit|cloth|wear|dress|hair|eye|skin|body|location|place|scene|weather|time|state)/i;
+  const NOISE_VAR_KEY_RE = /^(?:hp|mp|exp|lv|level|gold|money|coin|credit|score|rank|id|uuid|timestamp|created_at|updated_at|\$meta)$/i;
+  const STORY_VIS_RE = /(?:一袭|身穿|穿着|换上|披着|身披|戴着|系着|赤裸|裸露|未着寸缕|赤身|衣衫|裙摆|长裙|短裙|礼裙|汉服|旗袍|和服|睡衣|内衣|比基尼|校服|白袜|黑丝|丝袜|高跟|发型|长发|短发|双马尾|银发|白发|黑发|金发|粉发|红发|蓝发|紫发|灰发|挑染|瞳色|异瞳|红眸|蓝眸|金眸|紫眸|碧眸|兽耳|狐耳|猫耳|龙角|羽翼|尾巴|面容|肌肤|伤痕|青紫|红晕|身处|位于|站在|坐在|躺在|倚在|走进|来到|城堡|古塔|森林|温泉|海边|雨夜|月光|灯火|露台|宫殿|教室|街头|卧室|silver hair|white hair|black hair|blonde|red eyes|blue eyes|heterochromia|wearing|dressed in|naked|nude)/i;
+  const APPEARANCE_STICKY_RE = /(?:发|瞳|眼|眸|穿着|身穿|换上|一袭|披着|裙|衣|衫|服|饰|耳|角|尾|羽翼|肤|脸|面容|赤裸|未着寸缕|hair|eyes|heterochromia|wearing|dressed|outfit|nude|naked)/i;
+
+  function collectVariableVisualHints(obj, out, depth = 0, prefix = '') {
+    if (!obj || typeof obj !== 'object' || depth > 4 || out.length >= 10) return;
+    if (Array.isArray(obj)) {
+      for (const item of obj.slice(0, 12)) {
+        if (out.length >= 10) break;
+        if (item && typeof item === 'object') {
+          collectVariableVisualHints(item, out, depth + 1, prefix);
         }
-      } else if (typeof v === 'object' && !Array.isArray(v)) {
-        collectVariableVisualHints(v, out, depth + 1);
+      }
+      return;
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if (out.length >= 10) break;
+      if (NOISE_VAR_KEY_RE.test(k)) continue;
+      const fullKey = prefix ? `${prefix}·${k}` : k;
+      if (typeof v === 'string') {
+        const vs = cleanFloorForDistill(v, false);
+        if (vs && vs.length >= 2 && vs.length <= 160 && (VIS_KEY_RE.test(fullKey) || STORY_VIS_RE.test(vs))) {
+          out.push(`${fullKey}: ${vs}`);
+        }
+      } else if (v && typeof v === 'object') {
+        collectVariableVisualHints(v, out, depth + 1, k === 'stat_data' ? prefix : fullKey);
       }
     }
   }
@@ -293,7 +311,235 @@
     return '';
   }
 
-  async function collectWorldContext(ctx, mesId, mesObj, curCleanText, prevCleanText, settings) {
+  function extractVisualStatusFromRaw(raw) {
+    const items = [];
+    if (!raw || typeof raw !== 'string') return items;
+    try {
+      const blocks = [];
+      const tagPat = /<(?:details|statusbar|status|UpdateVariable|Variable)[^>]*>([\s\S]*?)<\/(?:details|statusbar|status|UpdateVariable|Variable)>/gi;
+      let m;
+      while ((m = tagPat.exec(raw)) !== null) {
+        blocks.push(m[1]);
+      }
+      const fencePat = /```(?:json|yaml|yml|status|statusbar|vars?|mvu|updatevariable)?\b([\s\S]*?)```/gi;
+      while ((m = fencePat.exec(raw)) !== null) {
+        blocks.push(m[1]);
+      }
+      const scanSrc = blocks.length ? blocks.join('\n') : '';
+      if (!scanSrc) return items;
+
+      const cleaned = scanSrc
+        .replace(/<summary[^>]*>[\s\S]*?<\/summary>/gi, '')
+        .replace(/<[^>]+>/g, '\n');
+      for (const line of cleaned.split(/\r?\n/)) {
+        const kv = line.match(/^\s*["']?([^"'：:=|\n]{2,18})["']?\s*[:：=]\s*["']?([^"'}\]\n]{2,90})/);
+        if (!kv) continue;
+        const k = kv[1].trim();
+        const v = kv[2].replace(/,\s*$/, '').trim();
+        if (!VIS_KEY_RE.test(k) || !v || /^\d+(?:\/\d+)?%?$/.test(v)) continue;
+        items.push({ score: 6.5, text: `当前状态栏 ${k}：${v}` });
+        if (items.length >= 5) break;
+      }
+    } catch {}
+    return items;
+  }
+
+  function extractGenericTableItems(container, curLower, prevLower, items, depth = 0) {
+    if (!container || typeof container !== 'object' || depth > 4 || items.length >= 20) return;
+    if (Array.isArray(container)) {
+      if (container.length > 0 && Array.isArray(container[0])) {
+        const headers = container[0].map((h) => String(h ?? '').trim()).filter(Boolean);
+        for (let r = 1; r < container.length && r < 40; r++) {
+          const row = container[r];
+          if (!Array.isArray(row)) continue;
+          const cells = [];
+          for (let c = 0; c < row.length; c++) {
+            const val = String(row[c] ?? '').replace(/\s+/g, ' ').trim();
+            if (!val || val === '-' || val === '无') continue;
+            const hk = headers[c] && headers[c].length <= 16 ? `${headers[c]}:` : '';
+            cells.push(`${hk}${val}`.slice(0, 60));
+          }
+          const rowTxt = cells.join(' · ').slice(0, 180);
+          if (!rowTxt || (!STORY_VIS_RE.test(rowTxt) && !VIS_KEY_RE.test(rowTxt) && matchTermScore(cells[0] || '', curLower, prevLower) === 0)) {
+            continue;
+          }
+          const hit = cells.some((c) => matchTermScore(c, curLower, prevLower) > 0);
+          items.push({
+            score: (hit ? 6.2 : 3.4) + (STORY_VIS_RE.test(rowTxt) || VIS_KEY_RE.test(rowTxt) ? 1.5 : 0),
+            text: `表格记忆：${rowTxt}`,
+          });
+        }
+        return;
+      }
+      for (const el of container.slice(0, 40)) {
+        if (items.length >= 20) break;
+        if (el && typeof el === 'object' && !Array.isArray(el)) {
+          const parts = [];
+          for (const [k, v] of Object.entries(el)) {
+            if (v == null || typeof v === 'object') continue;
+            const sv = String(v).replace(/\s+/g, ' ').trim();
+            if (!sv || NOISE_VAR_KEY_RE.test(k)) continue;
+            parts.push(`${k}:${sv.slice(0, 60)}`);
+          }
+          const rowTxt = parts.join(' · ').slice(0, 180);
+          if (rowTxt && (STORY_VIS_RE.test(rowTxt) || VIS_KEY_RE.test(rowTxt))) {
+            const hit = parts.some((p) => matchTermScore(p.split(':')[1] || p, curLower, prevLower) > 0);
+            items.push({ score: hit ? 6.0 : 3.5, text: `数据库记录：${rowTxt}` });
+          }
+        } else {
+          extractGenericTableItems(el, curLower, prevLower, items, depth + 1);
+        }
+      }
+      return;
+    }
+    for (const [k, v] of Object.entries(container)) {
+      if (k === 'LittleWhiteBox') continue;
+      if (v && typeof v === 'object') {
+        extractGenericTableItems(v, curLower, prevLower, items, depth + 1);
+      }
+    }
+  }
+
+  function collectUniversalMemoryPlugins(ctx, mesObj, curLower, prevLower) {
+    const items = [];
+    const promptKeyRe = /memory|table|sheet|summary|amily|vector|lore|note|remember|rag|db|mem|状态|记忆|总结|表格/i;
+    const systemBoilerplateRe = /(?:You are an AI|Write the next|jailbreak|system prompt|roleplay as|uncensored model|<rules>)/i;
+
+    // 1. Third-party extensionPrompts (表格记忆 st-memory-enhancement, Amily2, VectorStorage, Summarize, Author's Note, etc.)
+    try {
+      const extPrompts = ctx?.extensionPrompts || {};
+      for (const [key, val] of Object.entries(extPrompts)) {
+        if (!val) continue;
+        const rawStr = typeof val === 'string' ? val : (val.value || val.text || '');
+        if (!rawStr || typeof rawStr !== 'string') continue;
+        if (!promptKeyRe.test(key) && systemBoilerplateRe.test(rawStr)) continue;
+
+        const cleaned = cleanFloorForDistill(rawStr, false);
+        if (!cleaned) continue;
+        const isMemKey = promptKeyRe.test(key);
+        const lines = cleaned.split(/\r?\n/);
+        for (const rawLine of lines) {
+          let line = rawLine.trim();
+          if (!line || /^\|?[\s:-]{3,}(?:\|[\s:-]+)+\|?$/.test(line)) continue;
+          if (systemBoilerplateRe.test(line)) continue;
+          if (line.includes('|')) {
+            line = line
+              .split('|')
+              .map((c) => c.trim())
+              .filter(Boolean)
+              .join(' · ');
+          }
+          if (line.length < 8 || line.length > 220) continue;
+
+          const visMatch = VIS_KEY_RE.test(line) || STORY_VIS_RE.test(line);
+          const tokens = line.split(/[\s·：:,，、]+/).filter((t) => t.length >= 2).slice(0, 5);
+          const hitScore = tokens.reduce((acc, tok) => Math.max(acc, matchTermScore(tok, curLower, prevLower)), 0);
+          if (!visMatch && !(isMemKey && hitScore > 0)) continue;
+
+          const score = 3.2 + (isMemKey ? 1.5 : 0) + (visMatch ? 2.2 : 0) + hitScore;
+          items.push({ score, text: `记忆插件：${line.slice(0, 180)}` });
+        }
+      }
+    } catch {}
+
+    // 2. Built-in summaries & generic table metadata (st-memory-enhancement sheets/hash_sheets, custom DBs)
+    try {
+      const summaryTexts = [
+        ctx?.chatMetadata?.memory?.summary,
+        ctx?.chatMetadata?.summary,
+        mesObj?.extra?.summary,
+      ];
+      for (const stSum of summaryTexts) {
+        const s = cleanFloorForDistill(stSum || '', false);
+        if (s) items.push({ score: 4.5, text: `剧情摘要：${s.slice(0, 240)}` });
+      }
+      const tableContainers = [
+        ctx?.chatMetadata?.sheets,
+        ctx?.chatMetadata?.hash_sheets,
+        ctx?.chatMetadata?.memory_tables,
+        ctx?.chatMetadata?.tableData,
+        mesObj?.hash_sheets,
+        mesObj?.extra?.tableData,
+        mesObj?.extra?.memory,
+      ];
+      for (const tc of tableContainers) {
+        if (tc) extractGenericTableItems(tc, curLower, prevLower, items);
+      }
+    } catch {}
+
+    // 3. Deep variables scan (MVU stat_data, swipe variables, chat/global variables)
+    try {
+      const varHints = [];
+      const activeSwipeVars = Array.isArray(mesObj?.variables)
+        ? mesObj.variables[mesObj.swipe_id ?? 0]
+        : null;
+      collectVariableVisualHints(activeSwipeVars, varHints);
+      collectVariableVisualHints(mesObj?.variables, varHints);
+      collectVariableVisualHints(ctx?.chatMetadata?.variables, varHints);
+      collectVariableVisualHints(ctx?.variables?.local, varHints);
+      for (const vh of varHints.slice(0, 8)) {
+        items.push({ score: 5.0, text: `当前状态变量 ${vh}` });
+      }
+    } catch {}
+
+    return items;
+  }
+
+  function collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, maxLookback = 30) {
+    const items = [];
+    try {
+      const chat = ctx?.chat || [];
+      if (!chat.length || mesId <= 0) return items;
+
+      const entityHints = new Set();
+      const addHint = (tok) => {
+        const t = String(tok || '').trim();
+        if (t.length >= 2 && t.length <= 12) entityHints.add(t);
+      };
+      addHint(mesObj?.name);
+      addHint(ctx?.name2);
+      const curNames = curCleanText.match(/[A-Z][a-z]{2,14}|[\u4e00-\u9fa5]{2,4}(?=(?:说|笑|问|看|望|低头|抬手|转身|轻声|的))/g) || [];
+      for (const n of curNames.slice(0, 12)) addHint(n);
+
+      const startIdx = Math.max(0, mesId - maxLookback);
+      for (let i = mesId - 1; i >= startIdx; i--) {
+        const m = chat[i];
+        if (!m || m.is_system || !m.mes) continue;
+        const clean = cleanFloorForDistill(m.mes, false);
+        if (!clean) continue;
+
+        const dist = mesId - 1 - i;
+        const sentences = clean.split(/[。！？!\?\n]+/);
+        for (const rawSent of sentences) {
+          const s = rawSent.trim();
+          if (s.length < 10 || s.length > 150) continue;
+          if (!STORY_VIS_RE.test(s)) continue;
+
+          const hasStickyAppearance = APPEARANCE_STICKY_RE.test(s);
+          // Skip stale location-only lines from >3 turns back so old rooms never override current scene
+          if (dist >= 3 && !hasStickyAppearance) continue;
+
+          let entityBoost = 0;
+          for (const tok of entityHints) {
+            if (s.includes(tok)) {
+              entityBoost = 2.6;
+              break;
+            }
+          }
+          const speaker = m.name || (m.is_user ? ctx?.name1 : ctx?.name2) || '';
+          const recency = Math.max(1.0, 4.4 - dist * 0.12);
+          const score = recency + (hasStickyAppearance ? 2.1 : 0.4) + entityBoost;
+          items.push({
+            score,
+            text: `${speaker ? `${speaker}前文` : '前文特征'}：${s}`,
+          });
+        }
+      }
+    } catch {}
+    return items;
+  }
+
+  async function collectWorldContext(ctx, mesId, mesObj, curCleanText, prevCleanText, settings, rawFloorText = '') {
     const ch = ctx?.characters?.[ctx.characterId];
     const chData = ch?.data || {};
     const curLower = normText(curCleanText);
@@ -302,102 +548,111 @@
     const userName = ctx?.name1 || '';
     const userAppearance = String(ctx?.powerUserSettings?.persona_description || '').trim().slice(0, 220);
     const prevVisualPrompt = findPrevVisualPrompt(ctx, mesId);
+    const memoryMode = settings.memoryMode || (settings.autoWorldLore === false ? 'off' : 'smart');
 
-    if (!settings.autoWorldLore) {
+    if (memoryMode === 'off') {
       return { memoryContext: '', userName, userAppearance, prevVisualPrompt: '' };
     }
 
     const candidates = [];
 
-    // Source A: 小白X (storySummary.json + stateAtoms)
-    candidates.push(...collectXiaobaiXMemory(ctx, mesId, curLower, prevLower));
+    // Status block visual cues extracted before tag stripping (works in both smart & story_only)
+    candidates.push(...extractVisualStatusFromRaw(rawFloorText || mesObj?.mes || ''));
 
-    // Source B1: Card scenario / description brief
-    try {
-      const rawScenario = String(chData.scenario || ch?.scenario || '').trim();
-      if (rawScenario) {
-        candidates.push({ score: 3.5, text: `世界背景：${cleanFloorForDistill(rawScenario, false).slice(0, 220)}` });
-      } else {
-        const rawDesc = String(chData.description || ch?.description || '').trim();
-        if (rawDesc) {
-          candidates.push({ score: 2.5, text: `卡面设定：${cleanFloorForDistill(rawDesc, false).slice(0, 220)}` });
+    if (memoryMode === 'story_only') {
+      candidates.push(...collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, 35));
+    } else {
+      // Source A: 小白X (storySummary.json + stateAtoms)
+      const xbxItems = collectXiaobaiXMemory(ctx, mesId, curLower, prevLower);
+      candidates.push(...xbxItems);
+
+      // Source B: Universal third-party memory plugins (extensionPrompts, tables, MVU/chat vars)
+      const pluginItems = collectUniversalMemoryPlugins(ctx, mesObj, curLower, prevLower);
+      candidates.push(...pluginItems);
+
+      // Source C: Card scenario / description brief
+      try {
+        const rawScenario = String(chData.scenario || ch?.scenario || '').trim();
+        if (rawScenario) {
+          candidates.push({ score: 3.5, text: `世界背景：${cleanFloorForDistill(rawScenario, false).slice(0, 220)}` });
+        } else {
+          const rawDesc = String(chData.description || ch?.description || '').trim();
+          if (rawDesc) {
+            candidates.push({ score: 2.5, text: `卡面设定：${cleanFloorForDistill(rawDesc, false).slice(0, 220)}` });
+          }
+        }
+      } catch {}
+
+      // Source D: SillyTavern World Info (embedded character_book + linked external + chat metadata)
+      const rawEntries = [];
+      const addBookEntries = (book) => {
+        if (!book?.entries) return;
+        const vals = Array.isArray(book.entries) ? book.entries : Object.values(book.entries);
+        for (const e of vals) {
+          if (e && typeof e === 'object') rawEntries.push(e);
+        }
+      };
+      try { addBookEntries(chData.character_book); } catch {}
+
+      const linkedWorldNames = new Set();
+      const addWorldName = (val) => {
+        if (!val) return;
+        if (Array.isArray(val)) val.forEach((v) => v && linkedWorldNames.add(String(v)));
+        else linkedWorldNames.add(String(val));
+      };
+      addWorldName(chData.extensions?.world);
+      addWorldName(chData.extensions?.extra_worlds);
+      addWorldName(ctx?.chatMetadata?.world_info);
+
+      if (typeof ctx?.loadWorldInfo === 'function') {
+        for (const wName of linkedWorldNames) {
+          try {
+            const book = await ctx.loadWorldInfo(wName);
+            addBookEntries(book);
+          } catch {}
         }
       }
-    } catch {}
 
-    // Source C2: SillyTavern built-in summary & message/chat variables
-    try {
-      const stSummary = String(ctx?.chatMetadata?.memory?.summary || '').trim();
-      if (stSummary) {
-        candidates.push({ score: 4.0, text: `剧情摘要：${cleanFloorForDistill(stSummary, false).slice(0, 240)}` });
-      }
-      const varHints = [];
-      collectVariableVisualHints(mesObj?.variables, varHints);
-      collectVariableVisualHints(ctx?.chatMetadata?.variables, varHints);
-      for (const vh of varHints.slice(0, 4)) {
-        candidates.push({ score: 4.5, text: `当前状态变量 ${vh}` });
-      }
-    } catch {}
+      const seenLore = new Set();
+      for (const entry of rawEntries) {
+        if (entry.disable === true) continue;
+        const contentClean = cleanFloorForDistill(entry.content || '', false);
+        if (!contentClean) continue;
+        const dedupKey = contentClean.slice(0, 80);
+        if (seenLore.has(dedupKey)) continue;
+        seenLore.add(dedupKey);
 
-    // Source C3: SillyTavern World Info (embedded character_book + linked external + chat metadata)
-    const rawEntries = [];
-    const addBookEntries = (book) => {
-      if (!book?.entries) return;
-      const vals = Array.isArray(book.entries) ? book.entries : Object.values(book.entries);
-      for (const e of vals) {
-        if (e && typeof e === 'object') rawEntries.push(e);
-      }
-    };
-    try { addBookEntries(chData.character_book); } catch {}
-
-    const linkedWorldNames = new Set();
-    const addWorldName = (val) => {
-      if (!val) return;
-      if (Array.isArray(val)) val.forEach((v) => v && linkedWorldNames.add(String(v)));
-      else linkedWorldNames.add(String(val));
-    };
-    addWorldName(chData.extensions?.world);
-    addWorldName(chData.extensions?.extra_worlds);
-    addWorldName(ctx?.chatMetadata?.world_info);
-
-    if (typeof ctx?.loadWorldInfo === 'function') {
-      for (const wName of linkedWorldNames) {
-        try {
-          const book = await ctx.loadWorldInfo(wName);
-          addBookEntries(book);
-        } catch {}
-      }
-    }
-
-    const seenLore = new Set();
-    for (const entry of rawEntries) {
-      if (entry.disable === true) continue;
-      const contentClean = cleanFloorForDistill(entry.content || '', false);
-      if (!contentClean) continue;
-      const dedupKey = contentClean.slice(0, 80);
-      if (seenLore.has(dedupKey)) continue;
-      seenLore.add(dedupKey);
-
-      const keys = [
-        ...splitLoreKeys(entry.key),
-        ...splitLoreKeys(entry.keys),
-        ...splitLoreKeys(entry.keysecondary),
-      ];
-      let score = 0;
-      const matchedKeys = [];
-      for (const k of keys) {
-        const hit = matchTermScore(k, curLower, prevLower);
-        if (hit > 0) {
-          score += hit;
-          matchedKeys.push(k);
+        const keys = [
+          ...splitLoreKeys(entry.key),
+          ...splitLoreKeys(entry.keys),
+          ...splitLoreKeys(entry.keysecondary),
+        ];
+        let score = 0;
+        const matchedKeys = [];
+        for (const k of keys) {
+          const hit = matchTermScore(k, curLower, prevLower);
+          if (hit > 0) {
+            score += hit;
+            matchedKeys.push(k);
+          }
+        }
+        if (score === 0 && entry.constant && contentClean.length <= 260) {
+          score = 1.5;
+        }
+        if (score > 0) {
+          const title = (entry.comment || matchedKeys[0] || '世界设定').toString().trim().slice(0, 28);
+          candidates.push({ score: score + 2, text: `${title}：${contentClean.slice(0, 240)}` });
         }
       }
-      if (score === 0 && entry.constant && contentClean.length <= 260) {
-        score = 1.5;
-      }
-      if (score > 0) {
-        const title = (entry.comment || matchedKeys[0] || '世界设定').toString().trim().slice(0, 28);
-        candidates.push({ score: score + 2, text: `${title}：${contentClean.slice(0, 240)}` });
+
+      // Source E: Story-based trait extraction (auto-fills appearance/outfit consistency if no plugins or sparse records)
+      const storyItems = collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, 30);
+      const pluginCount = xbxItems.length + pluginItems.length;
+      for (const si of storyItems) {
+        candidates.push({
+          score: pluginCount >= 4 ? si.score - 1.0 : si.score + 0.5,
+          text: si.text,
+        });
       }
     }
 
@@ -408,7 +663,7 @@
     for (const c of candidates) {
       const sig = c.text.slice(0, 48);
       if (seenOut.has(sig)) continue;
-      if (totalLen + c.text.length + 1 > 1550) break;
+      if (totalLen + c.text.length + 1 > 1650) break;
       seenOut.add(sig);
       outLines.push(c.text);
       totalLen += c.text.length + 1;
@@ -441,8 +696,25 @@
   }
 
   async function pingEndpoint(baseUrl, token, timeoutMs) {
-    const url = normalizeStudioUrl(baseUrl);
-    if (!url) return null;
+    const raw = String(baseUrl || '').trim();
+    const url = normalizeStudioUrl(raw);
+    if (!url) {
+      return { ok: false, reason: 'empty_url', url: '', detail: '未填写生图服务地址' };
+    }
+    if (
+      typeof window !== 'undefined' &&
+      window.location?.protocol === 'https:' &&
+      /^http:\/\//i.test(url) &&
+      !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(url)
+    ) {
+      return {
+        ok: false,
+        reason: 'mixed_content',
+        url,
+        detail: '当前酒馆是 HTTPS 页面，浏览器禁止直接请求 HTTP 地址；请改用 HTTPS 生图地址（如 https://域名/yiyi-mac）',
+      };
+    }
+
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
@@ -453,11 +725,86 @@
         headers,
         signal: ctrl.signal,
       });
-      if (!resp.ok) return { ok: false, status: resp.status, url };
-      const data = await resp.json();
-      return { ok: true, url, data };
-    } catch {
-      return null;
+      if (!resp.ok) {
+        if (resp.status === 401 || resp.status === 403) {
+          return {
+            ok: false,
+            status: resp.status,
+            reason: 'auth_error',
+            url,
+            detail: '配置密码未填或不正确，请在下方输入框核对密码',
+          };
+        }
+        if (resp.status === 404) {
+          const isRel = raw.startsWith('/');
+          return {
+            ok: false,
+            status: 404,
+            reason: isRel ? 'not_found_relative' : 'not_found_remote',
+            url,
+            detail: isRel
+              ? `相对路径 ${raw} 返回 404——若你在用自己的酒馆或未配置同源反代，请改成完整远程地址（如 https://域名/yiyi-mac）`
+              : '接口 404（路径不对），请检查地址末尾是否漏写 /yiyi-mac',
+          };
+        }
+        if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+          return {
+            ok: false,
+            status: resp.status,
+            reason: 'bad_gateway',
+            url,
+            detail: `网关或隧道在线，但生图服务未启动或正在重启 (HTTP ${resp.status})`,
+          };
+        }
+        return {
+          ok: false,
+          status: resp.status,
+          reason: 'http_error',
+          url,
+          detail: `服务端返回异常状态 HTTP ${resp.status}`,
+        };
+      }
+
+      const ct = (resp.headers?.get?.('content-type') || '').toLowerCase();
+      let data = null;
+      try {
+        data = await resp.json();
+      } catch {}
+      if (!data || typeof data !== 'object' || (!('online' in data) && !ct.includes('application/json'))) {
+        return {
+          ok: false,
+          status: resp.status,
+          reason: 'not_bridge',
+          url,
+          detail: '目标返回了网页而非生图接口，请检查地址末尾是否漏写 /yiyi-mac 或被登录页拦截',
+        };
+      }
+      if (data.online === false) {
+        return {
+          ok: false,
+          status: resp.status,
+          reason: 'comfy_offline',
+          url,
+          detail: '桥接服务在线，但后端渲染引擎（ComfyUI）离线',
+        };
+      }
+      return { ok: true, status: resp.status, url, data };
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        const sec = Math.max(1, Math.round(timeoutMs / 100) / 10);
+        return {
+          ok: false,
+          reason: 'timeout',
+          url,
+          detail: `连接超时（超过 ${sec}s 无响应），请检查网络、代理或服务端是否开机`,
+        };
+      }
+      return {
+        ok: false,
+        reason: 'network_error',
+        url,
+        detail: '无法连通目标地址（请检查地址拼写、网络/代理、CORS 或服务端是否在线）',
+      };
     } finally {
       clearTimeout(timer);
     }
@@ -466,52 +813,75 @@
   async function resolveStudioUrl() {
     const s = getSettings();
     const policy = s.backendPolicy || 'mac';
-    let firstErr = null;
+    let winErr = null;
+    let macErr = null;
 
     if (policy !== 'mac') {
-      const localRes = await pingEndpoint(s.localUrl, s.token, 1200);
-      if (localRes?.ok) {
-        activeStudioUrl = localRes.url;
-        activeEndpointMode = 'local';
-        activeBusy = !!localRes.data?.busy;
-        updateConnectionUi();
-        return localRes;
+      const localUrl = String(s.localUrl || '').trim();
+      if (localUrl) {
+        const localRes = await pingEndpoint(localUrl, s.token, 1200);
+        if (localRes?.ok) {
+          activeStudioUrl = localRes.url;
+          activeEndpointMode = 'local';
+          activeBusy = !!localRes.data?.busy;
+          lastConnError = null;
+          updateConnectionUi();
+          return localRes;
+        }
+        winErr = localRes;
       }
-      const remoteRes = await pingEndpoint(s.remoteUrl, s.token, 2500);
-      if (remoteRes?.ok) {
-        activeStudioUrl = remoteRes.url;
-        activeEndpointMode = 'remote';
-        activeBusy = !!remoteRes.data?.busy;
-        updateConnectionUi();
-        return remoteRes;
+      const remoteUrl = String(s.remoteUrl || '').trim();
+      if (remoteUrl) {
+        const remoteRes = await pingEndpoint(remoteUrl, s.token, 4000);
+        if (remoteRes?.ok) {
+          activeStudioUrl = remoteRes.url;
+          activeEndpointMode = 'remote';
+          activeBusy = !!remoteRes.data?.busy;
+          lastConnError = null;
+          updateConnectionUi();
+          return remoteRes;
+        }
+        winErr = remoteRes;
       }
-      firstErr = localRes || remoteRes;
+      if (!localUrl && !remoteUrl) {
+        winErr = { ok: false, reason: 'empty_url', url: '', detail: '未填写 Windows 生图地址' };
+      }
       if (policy === 'windows') {
         activeStudioUrl = null;
-        activeEndpointMode = firstErr?.status === 401 ? 'auth_error' : 'offline';
+        lastConnError = winErr;
+        activeEndpointMode = winErr?.reason || 'offline';
         activeBusy = false;
         updateConnectionUi();
-        return firstErr || null;
+        return winErr;
       }
     }
 
     if (policy !== 'windows') {
-      const macRes = await pingEndpoint(s.macUrl || '/yiyi-mac', s.token, 3500);
+      const macUrl = String(s.macUrl ?? '/yiyi-mac').trim();
+      const macRes = await pingEndpoint(macUrl, s.token, 6500);
       if (macRes?.ok) {
         activeStudioUrl = macRes.url;
         activeEndpointMode = 'mac';
         activeBusy = !!macRes.data?.busy;
+        lastConnError = null;
         updateConnectionUi();
         return macRes;
       }
-      if (!firstErr || macRes?.status === 401) firstErr = macRes;
+      macErr = macRes;
     }
 
+    const bestErr =
+      (winErr?.reason === 'auth_error' ? winErr : null) ||
+      macErr ||
+      winErr ||
+      { ok: false, reason: 'network_error', url: '', detail: '暂未连上生图服务' };
+
     activeStudioUrl = null;
-    activeEndpointMode = firstErr?.status === 401 ? 'auth_error' : 'offline';
+    lastConnError = bestErr;
+    activeEndpointMode = bestErr.reason || 'offline';
     activeBusy = false;
     updateConnectionUi();
-    return firstErr || null;
+    return bestErr;
   }
 
   function updateConnectionUi() {
@@ -538,11 +908,27 @@
       } else if (activeEndpointMode === 'remote') {
         statusText.textContent = `🟢 远程 4060 在线 (${activeStudioUrl})`;
       } else if (activeEndpointMode === 'mac') {
-        statusText.textContent = `🟢 Mac 24h 极速在线 (${s.macUrl || '/yiyi-mac'})`;
+        statusText.textContent = `🟢 Mac 24h 极速在线 (${activeStudioUrl || s.macUrl || '/yiyi-mac'})`;
       } else if (activeEndpointMode === 'auth_error') {
         statusText.textContent = '🔒 需要输入正确的配置密码';
+      } else if (activeEndpointMode === 'mixed_content') {
+        statusText.textContent = '⚠️ HTTPS 页面禁止直连 HTTP 地址';
+      } else if (activeEndpointMode === 'not_found_relative') {
+        statusText.textContent = '❓ 相对路径 404，请改填完整远程地址';
+      } else if (activeEndpointMode === 'not_found_remote') {
+        statusText.textContent = '❓ 接口 404（请检查 /yiyi-mac 路径）';
+      } else if (activeEndpointMode === 'bad_gateway') {
+        statusText.textContent = '⚠️ 网关通但生图服务未启动';
+      } else if (activeEndpointMode === 'not_bridge') {
+        statusText.textContent = '❓ 返回了非生图网页（请检查路径）';
+      } else if (activeEndpointMode === 'comfy_offline') {
+        statusText.textContent = '⚠️ 桥接在线但渲染引擎离线';
+      } else if (activeEndpointMode === 'timeout') {
+        statusText.textContent = '⏱️ 连接超时，请检查网络或服务端';
+      } else if (activeEndpointMode === 'empty_url') {
+        statusText.textContent = '⚪ 未填写生图服务地址';
       } else {
-        statusText.textContent = '⚪ 生图服务未连接';
+        statusText.textContent = '⚪ 未连通（点「测试连接」查看详情）';
       }
     }
   }
@@ -589,6 +975,15 @@
     mesEl?.querySelector('.yiyi-floor-status')?.remove();
   }
 
+  function formatHttpErr(status, action, bodyText = '') {
+    const snippet = String(bodyText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+    if (status === 401 || status === 403) return `${action}失败 (${status})：配置密码未填或已失效，请在悬浮窗核对密码`;
+    if (status === 404) return `${action}失败 (404)：接口路径不存在，请检查地址末尾是否漏写 /yiyi-mac`;
+    if (status === 429) return `${action}失败 (429)：请求太快啦，请稍等几秒再试`;
+    if (status === 502 || status === 503 || status === 504) return `${action}失败 (${status})：网关或隧道暂时连不上后台渲染服务`;
+    return `${action}失败 (HTTP ${status})${snippet ? `：${snippet}` : ''}`;
+  }
+
   async function uploadImageToSillyTavern(base64Data, format, chName) {
     const ctx = getCtx();
     const headers = ctx.getRequestHeaders();
@@ -603,8 +998,14 @@
       }),
     });
     if (!resp.ok) {
-      const txt = await resp.text();
-      throw new Error(`上传到酒馆失败 (${resp.status}): ${txt}`);
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error(`上传到酒馆失败 (${resp.status})：酒馆登录会话或 CSRF 已过期，请刷新页面后重试`);
+      }
+      if (resp.status === 413) {
+        throw new Error('上传到酒馆失败 (413)：图片体积超过酒馆或反代限制');
+      }
+      const txt = await resp.text().catch(() => '');
+      throw new Error(`上传到酒馆失败 (${resp.status})${txt ? `: ${txt.slice(0, 140)}` : ''}`);
     }
     const data = await resp.json();
     return data.path;
@@ -680,15 +1081,18 @@
     try {
       const conn = await resolveStudioUrl();
       if (!conn?.ok) {
-        if (conn && conn.status === 401) {
-          toastInfo('访问密码 (Token) 不正确，请在悬浮窗中核对', 'error');
-        } else if (isManual || !s.silentOffline) {
-          toastInfo('电脑端生图服务不在线，请确认电脑已启动生图工作台/隧道', 'warning');
+        const showErr = isManual || conn?.reason === 'auth_error' || conn?.reason === 'mixed_content' || !s.silentOffline;
+        if (showErr) {
+          const target = conn?.url ? ` [${conn.url}]` : '';
+          toastInfo(
+            `${conn?.detail || '暂未连上生图服务，请检查网络与服务状态'}${target}`,
+            conn?.reason === 'auth_error' ? 'error' : 'warning',
+          );
         }
         return;
       }
 
-      if (mesEl) setFloorStatus(mesEl, '正在读取小白X记忆与当前剧情画面…', 8);
+      if (mesEl) setFloorStatus(mesEl, '正在提取记忆与剧情画面特征…', 8);
 
       const recentLines = [];
       for (let i = Math.max(0, idNum - 3); i < idNum; i++) {
@@ -705,7 +1109,7 @@
       const recentContext = recentLines.join('\n');
       const [wStr, hStr] = (s.ratio || '832x1216').split('x');
       const charName = mes.name || getActiveCharName();
-      const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, s);
+      const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, s, mes.mes);
 
       const startResp = await fetch(`${activeStudioUrl}/api/st/illustrate/start`, {
         method: 'POST',
@@ -736,24 +1140,47 @@
         }),
       });
       if (!startResp.ok) {
-        throw new Error(`启动任务失败 (${startResp.status})`);
+        const errBody = await startResp.text().catch(() => '');
+        throw new Error(formatHttpErr(startResp.status, '启动生图任务', errBody));
       }
       const { job_id } = await startResp.json();
 
-      // Poll job state cleanly (works reliably through Cloudflare & mobile networks)
+      // Poll job state cleanly (tolerates up to 3 transient mobile/Cloudflare blips)
       let jobData = null;
+      let transientErrors = 0;
       const deadline = Date.now() + 260000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 900));
-        const jr = await fetch(`${activeStudioUrl}/api/jobs/${job_id}`, {
-          method: 'GET',
-          headers: buildHeaders(s),
-        });
-        if (!jr.ok) throw new Error(`轮询任务失败 (${jr.status})`);
+        let jr;
+        try {
+          jr = await fetch(`${activeStudioUrl}/api/jobs/${job_id}`, {
+            method: 'GET',
+            headers: buildHeaders(s),
+          });
+        } catch (netErr) {
+          transientErrors += 1;
+          if (transientErrors > 3) {
+            throw new Error(`查询生图进度中断：${netErr?.message || '网络连接断开'}`);
+          }
+          await new Promise((r) => setTimeout(r, 1200));
+          continue;
+        }
+        if (!jr.ok) {
+          if (jr.status === 502 || jr.status === 503 || jr.status === 504) {
+            transientErrors += 1;
+            if (transientErrors <= 3) {
+              await new Promise((r) => setTimeout(r, 1200));
+              continue;
+            }
+          }
+          const errBody = await jr.text().catch(() => '');
+          throw new Error(formatHttpErr(jr.status, '查询生图进度', errBody));
+        }
+        transientErrors = 0;
         jobData = await jr.json();
 
         if (jobData.status === 'done') break;
-        if (jobData.status === 'error') throw new Error(jobData.error || '生图出错');
+        if (jobData.status === 'error') throw new Error(jobData.error || '服务端渲染出错');
         if (jobData.status === 'cancelled') throw new Error('生成已中断');
 
         let pct = 15;
@@ -773,7 +1200,7 @@
       }
 
       if (!jobData || jobData.status !== 'done') {
-        throw new Error('生成超时');
+        throw new Error('生成超时（超过 4 分钟未完成），请检查服务端状态');
       }
 
       const res = jobData.extra_result || {};
@@ -913,14 +1340,22 @@
           <input type="text" id="yiyi-opt-style" placeholder="例如: anime coloring, rim lighting" />
         </div>
 
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-world-lore" /> 自动读取小白X记忆 / 世界书与前图锚点（保持大世界人物形象一致）</label>
+        <div class="yiyi-field">
+          <label>剧情记忆与人物一致性来源</label>
+          <select id="yiyi-opt-memory-mode">
+            <option value="smart">智能全适配 (小白X/表格/数据库/世界书 + 剧情自总结)</option>
+            <option value="story_only">仅前文剧情自总结 (无任何记忆插件也适用)</option>
+            <option value="off">关闭记忆读取 (只看当前这一楼)</option>
+          </select>
+        </div>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 开启 1.5x 高清重绘（耗时略增，细节更锐利）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 无可用生图服务时静默不弹窗</label>
 
         <div class="yiyi-field">
-          <label>Mac 24h 服务地址（默认同源 /yiyi-mac 免配置）</label>
-          <input type="text" id="yiyi-opt-mac-url" />
+          <label>Mac 24h 服务地址（同源用 /yiyi-mac；独立或 HTTPS 酒馆填完整地址）</label>
+          <input type="text" id="yiyi-opt-mac-url" placeholder="/yiyi-mac 或 https://域名/yiyi-mac" />
+          <div class="yiyi-hint">提示：别人用自己的酒馆或 HTTPS 网页时，必须填完整的 https://.../yiyi-mac 地址（不要只填 /yiyi-mac）。</div>
         </div>
         <div class="yiyi-field">
           <label>Windows 本机地址（优先尝试）</label>
@@ -990,6 +1425,18 @@
 
     document.getElementById('yiyi-panel-close').onclick = () => panel.classList.add('yiyi-hidden');
     document.getElementById('yiyi-btn-test').onclick = async () => {
+      const st = getSettings();
+      const readInput = (id, key) => {
+        const el = document.getElementById(id);
+        if (el) st[key] = el.value;
+      };
+      readInput('yiyi-opt-policy', 'backendPolicy');
+      readInput('yiyi-opt-mac-url', 'macUrl');
+      readInput('yiyi-opt-local-url', 'localUrl');
+      readInput('yiyi-opt-remote-url', 'remoteUrl');
+      readInput('yiyi-opt-token', 'token');
+      saveSettings();
+
       const res = await resolveStudioUrl();
       if (res?.ok) {
         const modeLabel = activeEndpointMode === 'local'
@@ -998,10 +1445,12 @@
             ? 'Windows 远程 4060'
             : 'Mac 24h 极速';
         toastInfo(`连接成功 (${modeLabel})`, 'success');
-      } else if (res?.status === 401) {
-        toastInfo('配置密码未填或不正确，请在下方输入框填写密码', 'error');
       } else {
-        toastInfo('暂未连上生图服务，请检查网络与服务状态', 'warning');
+        const target = res?.url ? ` [${res.url}]` : '';
+        toastInfo(
+          `${res?.detail || '暂未连上生图服务，请检查网络与服务状态'}${target}`,
+          res?.reason === 'auth_error' ? 'error' : 'warning',
+        );
       }
     };
     document.getElementById('yiyi-btn-draw-last').onclick = () => {
@@ -1035,7 +1484,7 @@
     bindVal('yiyi-opt-prompt-mode', 'promptMode');
     bindVal('yiyi-opt-ratio', 'ratio');
     bindVal('yiyi-opt-style', 'stylePrefix');
-    bindVal('yiyi-opt-world-lore', 'autoWorldLore', true);
+    bindVal('yiyi-opt-memory-mode', 'memoryMode');
     bindVal('yiyi-opt-hires', 'hiresFix', true);
     bindVal('yiyi-opt-skip-first', 'skipFirstMessage', true);
     bindVal('yiyi-opt-silent', 'silentOffline', true);
@@ -1062,7 +1511,7 @@
     setVal('yiyi-opt-prompt-mode', s.promptMode);
     setVal('yiyi-opt-ratio', s.ratio);
     setVal('yiyi-opt-style', s.stylePrefix);
-    setVal('yiyi-opt-world-lore', s.autoWorldLore, true);
+    setVal('yiyi-opt-memory-mode', s.memoryMode || (s.autoWorldLore === false ? 'off' : 'smart'));
     setVal('yiyi-opt-hires', s.hiresFix, true);
     setVal('yiyi-opt-skip-first', s.skipFirstMessage, true);
     setVal('yiyi-opt-silent', s.silentOffline, true);

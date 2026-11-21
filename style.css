@@ -264,3 +264,9 @@
   background: linear-gradient(90deg, #38bdf8, #a78bfa, #f472b6);
   transition: width 0.25s ease;
 }
+.yiyi-hint {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #94a3b8;
+  margin-top: 2px;
+}
