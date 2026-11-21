@@ -1,11 +1,20 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
+  const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
+  const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
+  const BUILTIN_MAC_URLS = new Set([
+    '',
+    '/yiyi-mac',
+    DEFAULT_MAC_HTTPS_URL,
+    DEFAULT_MAC_HTTP_URL,
+  ]);
+
   const DEFAULTS = {
     enabled: false,
     backendPolicy: 'mac', // 'mac' | 'auto' | 'windows'
     localUrl: 'http://127.0.0.1:7860',
     remoteUrl: '',
-    macUrl: '/yiyi-mac',
+    macUrl: DEFAULT_MAC_HTTPS_URL,
     token: '',
     engine: 'anima',
     ratingMode: 'unrestricted',
@@ -36,6 +45,10 @@
     if (!ctx) return { ...DEFAULTS };
     const raw = ctx.extensionSettings[EXT_KEY] || {};
     const merged = Object.assign({}, DEFAULTS, raw);
+    const rawMac = typeof raw.macUrl === 'string' ? raw.macUrl.trim().replace(/\/+$/, '') : '';
+    if (!rawMac || rawMac === '/yiyi-mac') {
+      merged.macUrl = DEFAULT_MAC_HTTPS_URL;
+    }
     if (raw.memoryMode == null && raw.autoWorldLore === false) {
       merged.memoryMode = 'off';
     }
@@ -810,6 +823,21 @@
     }
   }
 
+  function getMacProbeCandidates(rawMacUrl) {
+    const normRaw = String(rawMacUrl ?? '').trim().replace(/\/+$/, '');
+    const isHttpsPage = typeof window !== 'undefined' && window.location?.protocol === 'https:';
+    if (BUILTIN_MAC_URLS.has(normRaw)) {
+      if (isHttpsPage) {
+        return [{ url: DEFAULT_MAC_HTTPS_URL, timeout: 6500 }];
+      }
+      return [
+        { url: DEFAULT_MAC_HTTP_URL, timeout: 3500 },
+        { url: DEFAULT_MAC_HTTPS_URL, timeout: 6500 },
+      ];
+    }
+    return [{ url: normRaw, timeout: 6500 }];
+  }
+
   async function resolveStudioUrl() {
     const s = getSettings();
     const policy = s.backendPolicy || 'mac';
@@ -857,17 +885,22 @@
     }
 
     if (policy !== 'windows') {
-      const macUrl = String(s.macUrl ?? '/yiyi-mac').trim();
-      const macRes = await pingEndpoint(macUrl, s.token, 6500);
-      if (macRes?.ok) {
-        activeStudioUrl = macRes.url;
-        activeEndpointMode = 'mac';
-        activeBusy = !!macRes.data?.busy;
-        lastConnError = null;
-        updateConnectionUi();
-        return macRes;
+      const candidates = getMacProbeCandidates(s.macUrl);
+      for (const cand of candidates) {
+        const macRes = await pingEndpoint(cand.url, s.token, cand.timeout);
+        if (macRes?.ok) {
+          activeStudioUrl = macRes.url;
+          activeEndpointMode = 'mac';
+          activeBusy = !!macRes.data?.busy;
+          lastConnError = null;
+          updateConnectionUi();
+          return macRes;
+        }
+        macErr = macRes;
+        if (macRes?.reason === 'auth_error' || macRes?.reason === 'comfy_offline') {
+          break;
+        }
       }
-      macErr = macRes;
     }
 
     const bestErr =
@@ -908,7 +941,7 @@
       } else if (activeEndpointMode === 'remote') {
         statusText.textContent = `🟢 远程 4060 在线 (${activeStudioUrl})`;
       } else if (activeEndpointMode === 'mac') {
-        statusText.textContent = `🟢 Mac 24h 极速在线 (${activeStudioUrl || s.macUrl || '/yiyi-mac'})`;
+        statusText.textContent = `🟢 Mac 24h 极速在线 (${activeStudioUrl || s.macUrl || DEFAULT_MAC_HTTPS_URL})`;
       } else if (activeEndpointMode === 'auth_error') {
         statusText.textContent = '🔒 需要输入正确的配置密码';
       } else if (activeEndpointMode === 'mixed_content') {
@@ -1353,9 +1386,9 @@
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 无可用生图服务时静默不弹窗</label>
 
         <div class="yiyi-field">
-          <label>Mac 24h 服务地址（同源用 /yiyi-mac；独立或 HTTPS 酒馆填完整地址）</label>
-          <input type="text" id="yiyi-opt-mac-url" placeholder="/yiyi-mac 或 https://域名/yiyi-mac" />
-          <div class="yiyi-hint">提示：别人用自己的酒馆或 HTTPS 网页时，必须填完整的 https://.../yiyi-mac 地址（不要只填 /yiyi-mac）。</div>
+          <label>Mac 24h 公网服务地址（已内置直连 + HTTPS 自动兜底）</label>
+          <input type="text" id="yiyi-opt-mac-url" placeholder="https://draw.fzy.asia/yiyi-mac" />
+          <div class="yiyi-hint">提示：已内置公网地址（HTTP 酒馆优先高速直连，HTTPS 酒馆或直连不通时自动切 HTTPS 隧道）；通常不用改地址，填好下方配置密码即可。</div>
         </div>
         <div class="yiyi-field">
           <label>Windows 本机地址（优先尝试）</label>
@@ -1515,7 +1548,7 @@
     setVal('yiyi-opt-hires', s.hiresFix, true);
     setVal('yiyi-opt-skip-first', s.skipFirstMessage, true);
     setVal('yiyi-opt-silent', s.silentOffline, true);
-    setVal('yiyi-opt-mac-url', s.macUrl || '/yiyi-mac');
+    setVal('yiyi-opt-mac-url', s.macUrl || DEFAULT_MAC_HTTPS_URL);
     setVal('yiyi-opt-local-url', s.localUrl);
     setVal('yiyi-opt-remote-url', s.remoteUrl);
     setVal('yiyi-opt-token', s.token);
@@ -1553,9 +1586,19 @@
   }
 
   function init() {
-    if (!getCtx()) {
+    const ctx = getCtx();
+    if (!ctx) {
       setTimeout(init, 600);
       return;
+    }
+    const existingRaw = ctx.extensionSettings?.[EXT_KEY];
+    const prevMacNorm = typeof existingRaw?.macUrl === 'string'
+      ? existingRaw.macUrl.trim().replace(/\/+$/, '')
+      : '';
+    const shouldPersistMigration = !!existingRaw && (!prevMacNorm || prevMacNorm === '/yiyi-mac');
+    getSettings();
+    if (shouldPersistMigration) {
+      saveSettings();
     }
     buildFloatingUi();
     registerEvents();
