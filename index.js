@@ -25,6 +25,8 @@
     silentOffline: true,
     autoWorldLore: true,
     memoryMode: 'smart', // 'smart' | 'story_only' | 'off'
+    overlayMode: 'auto', // 'auto' | 'always' | 'floor_only'
+    overlayPos: null,
     stylePrefix: '',
     fabPos: null,
   };
@@ -33,6 +35,9 @@
   let activeEndpointMode = 'offline'; // 'local' | 'remote' | 'mac' | 'auth_error' | ... | 'offline'
   let activeBusy = false;
   let lastConnError = null;
+  let activeProgressLabel = '';
+  let overlayIndex = 0;
+  let overlayCollapsed = false;
   const pendingAutoIds = new Set();
   const runningFloorIds = new Set();
 
@@ -82,7 +87,8 @@
     }
     s = s
       .replace(/<(?:think|thinking|thought)>[\s\S]*?<\/(?:think|thinking|thought)>/gi, '')
-      .replace(/<(?:style|script|details|UpdateVariable|Variable|statusbar|status|options|choices)[^>]*>[\s\S]*?<\/(?:style|script|details|UpdateVariable|Variable|statusbar|status|options|choices)>/gi, '')
+      .replace(/<(?:style|script|head|svg|template|noscript|details|UpdateVariable|Variable|variables|statusbar|status|options|choices|mvu|JSONPatch|tableEdit)\b[^>]*>[\s\S]*?<\/(?:style|script|head|svg|template|noscript|details|UpdateVariable|Variable|variables|statusbar|status|options|choices|mvu|JSONPatch|tableEdit)>/gi, '')
+      .replace(/```(?:html|css|js|javascript|json|yaml|yml|mvu|updatevariable|status|statusbar)\b[\s\S]*?```/gi, '')
       .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/<br\s*\/?>|<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
       .replace(/<[^>]+>/g, '')
@@ -933,7 +939,7 @@
       else if (activeStudioUrl) dot.classList.add('online');
     }
     if (tag) {
-      tag.textContent = s.enabled ? '自动:开' : '自动:关';
+      tag.textContent = activeProgressLabel || (s.enabled ? '自动:开' : '自动:关');
     }
     if (statusText) {
       if (activeEndpointMode === 'local') {
@@ -972,6 +978,305 @@
     } else {
       console.log(`[yiyi-st:${kind}]`, msg);
     }
+  }
+
+  function hasForeignPopoverOpen() {
+    try {
+      const nodes = document.querySelectorAll?.('[popover]') || [];
+      for (const n of nodes) {
+        if (n && !String(n.id || '').startsWith('yiyi-') && n.matches?.(':popover-open')) {
+          return true;
+        }
+      }
+    } catch {}
+    return false;
+  }
+
+  function syncTopLayer(el, shouldBeVisible, forceRestack = false) {
+    if (!el) return;
+    const foreignOpen = hasForeignPopoverOpen();
+    const hasPop = typeof el.showPopover === 'function' && typeof el.hidePopover === 'function';
+    if (!shouldBeVisible) {
+      try {
+        if (hasPop && el.matches?.(':popover-open')) el.hidePopover();
+      } catch {}
+      try {
+        if (el.hasAttribute?.('popover')) el.removeAttribute('popover');
+      } catch {}
+      return;
+    }
+    if (foreignOpen && hasPop) {
+      try {
+        if (el.getAttribute?.('popover') !== 'manual') {
+          el.setAttribute('popover', 'manual');
+        }
+        if (forceRestack && el.matches?.(':popover-open')) {
+          el.hidePopover();
+        }
+        if (!el.matches?.(':popover-open')) {
+          el.showPopover();
+        }
+      } catch {}
+    }
+  }
+
+  function promoteHudAbovePopovers() {
+    const foreignOpen = hasForeignPopoverOpen();
+    const hudIds = ['yiyi-st-fab', 'yiyi-float-progress', 'yiyi-overlay-viewer', 'yiyi-st-panel', 'yiyi-lightbox'];
+    for (const id of hudIds) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const visible = !el.classList?.contains('yiyi-hidden');
+      if (!foreignOpen && el.matches?.(':popover-open')) {
+        syncTopLayer(el, false);
+      } else if (foreignOpen && visible) {
+        syncTopLayer(el, true, true);
+      }
+    }
+  }
+
+  function isElementHidden(el) {
+    if (!el) return true;
+    try {
+      const cs = window.getComputedStyle?.(el);
+      if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0)) {
+        return true;
+      }
+      const r = el.getBoundingClientRect?.();
+      if (r && (r.height < 20 || r.width < 20)) return true;
+    } catch {}
+    return false;
+  }
+
+  function isSameFloorOverlayActive(mesEl) {
+    try {
+      const ctx = getCtx();
+      const targetEl = mesEl || document.querySelector?.('#chat .mes[mesid]');
+      if (!targetEl) {
+        if ((ctx?.chat?.length || 0) > 0) return true;
+      } else if (isElementHidden(targetEl)) {
+        return true;
+      }
+
+      const chatEl = document.getElementById?.('chat');
+      const chatRect = chatEl?.getBoundingClientRect?.();
+      const vw = window.innerWidth || 0;
+      const vh = window.innerHeight || 0;
+      const chatW = chatRect?.width || vw;
+      const chatH = Math.min(chatRect?.height || vh || 800, vh || 800);
+
+      const iframes = document.querySelectorAll?.('iframe') || [];
+      for (const ifr of iframes) {
+        if (!ifr) continue;
+        if (ifr.matches?.(':popover-open')) return true;
+        let cs = null;
+        try { cs = window.getComputedStyle?.(ifr); } catch {}
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
+        const ir = ifr.getBoundingClientRect?.();
+        if (!ir || ir.width < 10 || ir.height < 10) continue;
+        const coversChat = ir.width >= Math.max(200, chatW * 0.6) && ir.height >= Math.max(160, chatH * 0.5);
+        const overlayPos = cs?.position === 'fixed' || cs?.position === 'sticky' || cs?.position === 'absolute';
+        if (coversChat && (overlayPos || ir.height >= Math.max(280, (vh || 800) * 0.72))) {
+          return true;
+        }
+      }
+
+      if (mesEl && typeof document.elementFromPoint === 'function') {
+        const media = mesEl.querySelector?.('.mes_media img, .mes_img');
+        const mr = media?.getBoundingClientRect?.();
+        const maxW = vw || 1280;
+        const maxH = vh || 800;
+        if (mr && mr.width > 10 && mr.height > 10 && mr.top >= 0 && mr.left >= 0 && mr.bottom <= maxH && mr.right <= maxW) {
+          const cx = mr.left + mr.width / 2;
+          const cy = mr.top + mr.height / 2;
+          const hit = document.elementFromPoint(cx, cy);
+          if (
+            hit &&
+            (hit.tagName === 'IFRAME' ||
+              (!mesEl.contains?.(hit) &&
+                !hit.closest?.('#yiyi-st-fab, #yiyi-st-panel, #yiyi-overlay-viewer, #yiyi-float-progress, #yiyi-lightbox')))
+          ) {
+            return true;
+          }
+        }
+      }
+    } catch {}
+    return false;
+  }
+
+  function collectChatIllustrations() {
+    const items = [];
+    try {
+      const ctx = getCtx();
+      const chat = ctx?.chat || [];
+      for (let i = 0; i < chat.length; i++) {
+        const m = chat[i];
+        if (!m || m.is_user || m.is_system) continue;
+        const mediaArr = Array.isArray(m.extra?.media) ? m.extra.media : [];
+        for (let idx = 0; idx < mediaArr.length; idx++) {
+          const item = mediaArr[idx];
+          if (!item?.url) continue;
+          if (item.type && item.type !== 'image') continue;
+          items.push({
+            mesId: i,
+            mediaIdx: idx,
+            url: item.url,
+            title: String(item.title || '').trim(),
+            negative: String(item.negative || '').trim(),
+            charName: m.name || getActiveCharName() || '角色',
+          });
+        }
+      }
+    } catch {}
+    return items;
+  }
+
+  function updateGalleryBadge() {
+    const badge = document.getElementById('yiyi-fab-badge');
+    if (!badge) return;
+    const count = collectChatIllustrations().length;
+    if (count > 0) {
+      badge.textContent = String(count);
+      badge.style.display = 'inline-block';
+    } else {
+      badge.textContent = '0';
+      badge.style.display = 'none';
+    }
+  }
+
+  function openLightbox(srcUrl) {
+    const lb = document.getElementById('yiyi-lightbox');
+    const img = document.getElementById('yiyi-lb-img');
+    if (!lb || !img || !srcUrl) return;
+    img.src = srcUrl;
+    lb.classList.remove('yiyi-hidden');
+    syncTopLayer(lb, true, true);
+  }
+
+  function closeLightbox() {
+    const lb = document.getElementById('yiyi-lightbox');
+    if (!lb) return;
+    syncTopLayer(lb, false);
+    lb.classList.add('yiyi-hidden');
+  }
+
+  function renderOverlayViewer(preferredMesId = null) {
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    if (!viewer) return;
+    const items = collectChatIllustrations();
+    const titleEl = document.getElementById('yiyi-ov-title');
+    const stageEl = document.getElementById('yiyi-ov-stage');
+    const metaEl = document.getElementById('yiyi-ov-meta');
+    const promptEl = document.getElementById('yiyi-ov-prompt-text');
+    const redrawBtn = document.getElementById('yiyi-ov-redraw');
+    const zoomBtn = document.getElementById('yiyi-ov-zoom');
+
+    if (!items.length) {
+      overlayIndex = 0;
+      if (titleEl) titleEl.textContent = '🖼️ 依依同层悬浮画框';
+      if (stageEl) {
+        stageEl.innerHTML = '';
+        const empty = document.createElement('div');
+        empty.className = 'yiyi-ov-empty';
+        empty.textContent = '当前对话还没有插画。\n在同层卡或伪同层界面中，直接点下方按钮或悬浮球 🖌️ 就能立即绘制并显示在这里。';
+        stageEl.appendChild(empty);
+      }
+      if (metaEl) metaEl.textContent = '共 0 张 · 随时可生成';
+      if (promptEl) promptEl.textContent = '';
+      if (redrawBtn) redrawBtn.dataset.mesId = '';
+      if (zoomBtn) zoomBtn.dataset.url = '';
+      return;
+    }
+
+    if (preferredMesId !== null && preferredMesId !== undefined) {
+      let foundIdx = -1;
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (Number(items[i].mesId) === Number(preferredMesId)) {
+          foundIdx = i;
+          break;
+        }
+      }
+      overlayIndex = foundIdx >= 0 ? foundIdx : items.length - 1;
+    } else if (overlayIndex < 0 || overlayIndex >= items.length) {
+      overlayIndex = items.length - 1;
+    }
+
+    const cur = items[overlayIndex];
+    if (titleEl) titleEl.textContent = `🖼️ ${cur.charName} · 第 ${cur.mesId} 层`;
+    if (stageEl) {
+      stageEl.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = cur.url;
+      img.alt = `第 ${cur.mesId} 层插画`;
+      img.onclick = () => openLightbox(cur.url);
+      stageEl.appendChild(img);
+    }
+    if (metaEl) metaEl.textContent = `第 ${overlayIndex + 1} / ${items.length} 张 · 第 ${cur.mesId} 层`;
+    if (promptEl) {
+      promptEl.textContent = cur.title
+        ? `Positive:\n${cur.title}${cur.negative ? `\n\nNegative:\n${cur.negative}` : ''}`
+        : '（未记录提示词）';
+    }
+    if (redrawBtn) redrawBtn.dataset.mesId = String(cur.mesId);
+    if (zoomBtn) zoomBtn.dataset.url = cur.url;
+  }
+
+  function showOverlayViewer(preferredMesId = null) {
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    if (!viewer) return;
+    overlayCollapsed = false;
+    viewer.classList.remove('yiyi-ov-collapsed');
+    viewer.classList.remove('yiyi-hidden');
+    const collapseBtn = document.getElementById('yiyi-ov-collapse');
+    if (collapseBtn) collapseBtn.textContent = '—';
+    renderOverlayViewer(preferredMesId);
+    syncTopLayer(viewer, true, true);
+  }
+
+  function hideOverlayViewer() {
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    if (!viewer) return;
+    syncTopLayer(viewer, false);
+    viewer.classList.add('yiyi-hidden');
+  }
+
+  function setGlobalProgress(msg, pct, showFloatingPill = false) {
+    activeProgressLabel = typeof pct === 'number' ? `绘图中 ${Math.round(pct)}%` : '绘图中…';
+    updateConnectionUi();
+    const pill = document.getElementById('yiyi-float-progress');
+    if (!pill) return;
+    if (showFloatingPill) {
+      pill.classList.remove('yiyi-hidden');
+      const label = pill.querySelector('.yiyi-floor-msg');
+      const fill = pill.querySelector('.yiyi-floor-bar-fill');
+      if (label) label.textContent = msg;
+      if (fill && typeof pct === 'number') {
+        fill.style.width = `${Math.max(5, Math.min(100, pct))}%`;
+      }
+      syncTopLayer(pill, true);
+    }
+  }
+
+  function clearGlobalProgress() {
+    activeProgressLabel = '';
+    updateConnectionUi();
+    const pill = document.getElementById('yiyi-float-progress');
+    if (pill) {
+      syncTopLayer(pill, false);
+      pill.classList.add('yiyi-hidden');
+    }
+  }
+
+  function drawLatestFloor() {
+    const ctx = getCtx();
+    const chat = ctx?.chat || [];
+    for (let i = chat.length - 1; i >= 0; i--) {
+      if (!chat[i].is_user && !chat[i].is_system) {
+        illustrateFloor(i, true);
+        return;
+      }
+    }
+    toastInfo('当前对话还没有可绘制的 AI 楼层', 'info');
   }
 
   function ensureFloorStatusBar(mesEl) {
@@ -1048,53 +1353,52 @@
     const ctx = getCtx();
     const mes = ctx?.chat?.[mesId];
     const mesEl = document.querySelector(`.mes[mesid="${mesId}"]`);
-    if (!mes || !mesEl) return;
+    if (!mes) return;
 
     if (!mes.extra || typeof mes.extra !== 'object') {
       mes.extra = {};
     }
     const jq = window.$ || window.jQuery;
-    if (
-      typeof ctx.ensureMessageMediaIsArray === 'function' &&
-      typeof ctx.appendMediaToMessage === 'function' &&
-      typeof jq === 'function'
-    ) {
+    if (typeof ctx.ensureMessageMediaIsArray === 'function') {
       ctx.ensureMessageMediaIsArray(mes);
-      if (!Array.isArray(mes.extra.media)) {
-        mes.extra.media = [];
-      }
-      mes.extra.media.push({
-        url: savedPath,
-        type: 'image',
-        title: positivePrompt || 'AI Illustration',
-        generation_type: 'free',
-        negative: negativePrompt || '',
-        source: 'generated',
-      });
-      mes.extra.media_display = 'gallery';
-      mes.extra.media_index = mes.extra.media.length - 1;
-      mes.extra.inline_image = true;
-      ctx.appendMediaToMessage(mes, jq(mesEl));
-    } else {
-      if (!Array.isArray(mes.extra.media)) {
-        mes.extra.media = [];
-      }
-      mes.extra.media.push({
-        url: savedPath,
-        type: 'image',
-        title: positivePrompt || 'AI Illustration',
-        source: 'generated',
-      });
-      mes.extra.inline_image = true;
-      const img = document.createElement('img');
-      img.src = savedPath;
-      img.className = 'mes_img';
-      img.style.maxWidth = '100%';
-      img.style.borderRadius = '8px';
-      mesEl.querySelector('.mes_text')?.after(img);
     }
+    if (!Array.isArray(mes.extra.media)) {
+      mes.extra.media = [];
+    }
+    mes.extra.media.push({
+      url: savedPath,
+      type: 'image',
+      title: positivePrompt || 'AI Illustration',
+      generation_type: 'free',
+      negative: negativePrompt || '',
+      source: 'generated',
+    });
+    mes.extra.media_display = 'gallery';
+    mes.extra.media_index = mes.extra.media.length - 1;
+    mes.extra.inline_image = true;
+
+    if (mesEl) {
+      if (typeof ctx.appendMediaToMessage === 'function' && typeof jq === 'function') {
+        ctx.appendMediaToMessage(mes, jq(mesEl));
+      } else {
+        const img = document.createElement('img');
+        img.src = savedPath;
+        img.className = 'mes_img';
+        img.style.maxWidth = '100%';
+        img.style.borderRadius = '8px';
+        mesEl.querySelector('.mes_text')?.after(img);
+      }
+    }
+
     if (typeof ctx.saveChat === 'function') {
       await ctx.saveChat();
+    }
+
+    updateGalleryBadge();
+    const s = getSettings();
+    const mode = s.overlayMode || 'auto';
+    if (mode === 'always' || (mode !== 'floor_only' && isSameFloorOverlayActive(mesEl))) {
+      showOverlayViewer(mesId);
     }
   }
 
@@ -1125,7 +1429,9 @@
         return;
       }
 
+      const showFloat = s.overlayMode === 'always' || !mesEl || isSameFloorOverlayActive(mesEl);
       if (mesEl) setFloorStatus(mesEl, '正在提取记忆与剧情画面特征…', 8);
+      setGlobalProgress('正在提取记忆与剧情画面特征…', 8, showFloat);
 
       const recentLines = [];
       for (let i = Math.max(0, idNum - 3); i < idNum; i++) {
@@ -1230,6 +1536,7 @@
           pct = 93;
         }
         if (mesEl) setFloorStatus(mesEl, msg, pct);
+        setGlobalProgress(msg, pct, showFloat);
       }
 
       if (!jobData || jobData.status !== 'done') {
@@ -1246,6 +1553,7 @@
       }
 
       if (mesEl) setFloorStatus(mesEl, '正在保存到酒馆楼层…', 97);
+      setGlobalProgress('正在保存到酒馆楼层…', 97, showFloat);
       const savedPath = await uploadImageToSillyTavern(
         res.image_base64,
         res.image_format || 'webp',
@@ -1259,6 +1567,7 @@
     } finally {
       runningFloorIds.delete(idNum);
       if (mesEl) removeFloorStatus(mesEl);
+      clearGlobalProgress();
       resolveStudioUrl().catch(() => {});
     }
   }
@@ -1290,13 +1599,66 @@
     });
   }
 
+  function attachFixedDrag(handleEl, targetEl, opts = {}) {
+    if (!handleEl || !targetEl) return;
+    const anchorY = opts.anchorY === 'top' ? 'top' : 'bottom';
+    const minW = opts.minW || 90;
+    const minH = opts.minH || 48;
+    let dragging = false;
+    let moved = false;
+    let startX = 0;
+    let startY = 0;
+    let origRight = 16;
+    let origY = 76;
+
+    handleEl.addEventListener('pointerdown', (e) => {
+      if (opts.ignoreSelector && e.target?.closest?.(opts.ignoreSelector)) return;
+      dragging = true;
+      moved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      const rect = targetEl.getBoundingClientRect?.();
+      const vw = window.innerWidth || 1280;
+      const vh = window.innerHeight || 800;
+      origRight = rect ? vw - rect.right : 16;
+      origY = rect ? (anchorY === 'top' ? rect.top : vh - rect.bottom) : 76;
+      handleEl.setPointerCapture?.(e.pointerId);
+    });
+    handleEl.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
+      if (!moved) return;
+      const vw = window.innerWidth || 1280;
+      const vh = window.innerHeight || 800;
+      const nextRight = Math.max(8, Math.min(vw - minW, origRight - dx));
+      const nextY = Math.max(8, Math.min(vh - minH, anchorY === 'top' ? origY + dy : origY - dy));
+      targetEl.style.right = `${nextRight}px`;
+      targetEl.style[anchorY] = `${nextY}px`;
+    });
+    handleEl.addEventListener('pointerup', (e) => {
+      if (!dragging) return;
+      dragging = false;
+      handleEl.releasePointerCapture?.(e.pointerId);
+      if (moved) {
+        opts.onSavePos?.({
+          right: parseInt(targetEl.style.right, 10) || 16,
+          [anchorY]: parseInt(targetEl.style[anchorY], 10) || (anchorY === 'top' ? 64 : 76),
+        });
+      } else {
+        opts.onClick?.(e);
+      }
+    });
+  }
+
   function buildFloatingUi() {
     if (document.getElementById('yiyi-st-fab')) return;
     const s = getSettings();
 
     const fab = document.createElement('div');
     fab.id = 'yiyi-st-fab';
-    fab.innerHTML = `<span class="yiyi-dot"></span><span>🎨</span><span class="yiyi-state-tag">自动:关</span>`;
+    fab.innerHTML = `<span class="yiyi-dot"></span><span>🎨</span><span class="yiyi-state-tag">自动:关</span><button type="button" class="yiyi-fab-mini" id="yiyi-fab-draw" title="立即为最新楼层生图">🖌️</button><button type="button" class="yiyi-fab-mini" id="yiyi-fab-gallery" title="打开/收起悬浮画框（同层卡专用）">🖼️<span class="yiyi-fab-badge" id="yiyi-fab-badge" style="display:none">0</span></button>`;
     if (s.fabPos && typeof s.fabPos.right === 'number' && typeof s.fabPos.bottom === 'number') {
       fab.style.right = `${s.fabPos.right}px`;
       fab.style.bottom = `${s.fabPos.bottom}px`;
@@ -1322,6 +1684,7 @@
         </div>
 
         <button class="yiyi-btn yiyi-btn-primary" id="yiyi-btn-draw-last">🖌️ 为最新楼层立即画一张</button>
+        <button class="yiyi-btn" id="yiyi-btn-gallery">🖼️ 打开本局插画画廊（同层卡专用）</button>
 
         <div class="yiyi-grid-2">
           <div class="yiyi-field">
@@ -1381,6 +1744,14 @@
             <option value="off">关闭记忆读取 (只看当前这一楼)</option>
           </select>
         </div>
+        <div class="yiyi-field">
+          <label>同层卡 / 伪同层适配展示</label>
+          <select id="yiyi-opt-overlay-mode">
+            <option value="auto">智能同层适配 (普通卡贴楼层，同层/伪同层自动弹悬浮画框)</option>
+            <option value="always">始终弹出悬浮画框 (同时保留楼层原图)</option>
+            <option value="floor_only">仅挂载到酒馆楼层 (关闭悬浮画框)</option>
+          </select>
+        </div>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 开启 1.5x 高清重绘（耗时略增，细节更锐利）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 无可用生图服务时静默不弹窗</label>
@@ -1405,98 +1776,202 @@
       </div>
     `;
 
-    document.body.append(fab, panel);
+    const floatProg = document.createElement('div');
+    floatProg.id = 'yiyi-float-progress';
+    floatProg.className = 'yiyi-hidden';
+    floatProg.innerHTML = `
+      <div class="yiyi-floor-msg">正在准备生图…</div>
+      <div class="yiyi-floor-bar-track"><div class="yiyi-floor-bar-fill"></div></div>
+    `;
 
-    // Draggable FAB (pointer events work on both mouse and phone touch)
-    let dragging = false;
-    let moved = false;
-    let startX = 0;
-    let startY = 0;
-    let origRight = 16;
-    let origBottom = 76;
+    const viewer = document.createElement('div');
+    viewer.id = 'yiyi-overlay-viewer';
+    viewer.className = 'yiyi-hidden';
+    viewer.innerHTML = `
+      <div class="yiyi-ov-head" id="yiyi-ov-head" title="按住此处可拖动悬浮画框">
+        <div class="yiyi-ov-title" id="yiyi-ov-title">🖼️ 依依同层悬浮画框</div>
+        <div class="yiyi-ov-actions">
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-prev" title="上一张">◀</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-next" title="下一张">▶</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-redraw" title="重画这一层">🔄</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-zoom" title="大图放大">🔍</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-collapse" title="折叠/展开">—</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-close" title="收起画框">✕</button>
+        </div>
+      </div>
+      <div class="yiyi-ov-img-wrap" id="yiyi-ov-stage"></div>
+      <div class="yiyi-ov-foot">
+        <div class="yiyi-ov-meta-row">
+          <span class="yiyi-ov-meta" id="yiyi-ov-meta">第 0 层</span>
+          <button type="button" class="yiyi-btn" id="yiyi-ov-draw-last">🖌️ 画最新一楼</button>
+        </div>
+        <details class="yiyi-details">
+          <summary>查看本图提示词</summary>
+          <textarea id="yiyi-ov-prompt-text" rows="4" readonly></textarea>
+        </details>
+      </div>
+    `;
+    if (s.overlayPos && typeof s.overlayPos.right === 'number' && typeof s.overlayPos.top === 'number') {
+      viewer.style.right = `${s.overlayPos.right}px`;
+      viewer.style.top = `${s.overlayPos.top}px`;
+    }
 
-    fab.addEventListener('pointerdown', (e) => {
-      dragging = true;
-      moved = false;
-      startX = e.clientX;
-      startY = e.clientY;
-      const rect = fab.getBoundingClientRect();
-      origRight = window.innerWidth - rect.right;
-      origBottom = window.innerHeight - rect.bottom;
-      fab.setPointerCapture(e.pointerId);
-    });
-    fab.addEventListener('pointermove', (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
-      if (!moved) return;
-      const nextRight = Math.max(8, Math.min(window.innerWidth - 90, origRight - dx));
-      const nextBottom = Math.max(8, Math.min(window.innerHeight - 48, origBottom - dy));
-      fab.style.right = `${nextRight}px`;
-      fab.style.bottom = `${nextBottom}px`;
-    });
-    fab.addEventListener('pointerup', (e) => {
-      if (!dragging) return;
-      dragging = false;
-      fab.releasePointerCapture(e.pointerId);
-      if (moved) {
+    const lightbox = document.createElement('div');
+    lightbox.id = 'yiyi-lightbox';
+    lightbox.className = 'yiyi-hidden';
+    lightbox.innerHTML = `
+      <button type="button" class="yiyi-lb-close" id="yiyi-lb-close" title="关闭大图">✕</button>
+      <img id="yiyi-lb-img" alt="插画预览" />
+    `;
+
+    document.body.append(fab, panel, floatProg, viewer, lightbox);
+
+    attachFixedDrag(fab, fab, {
+      anchorY: 'bottom',
+      minW: 110,
+      minH: 48,
+      ignoreSelector: '.yiyi-fab-mini',
+      onSavePos: (pos) => {
         const st = getSettings();
-        st.fabPos = {
-          right: parseInt(fab.style.right, 10) || 16,
-          bottom: parseInt(fab.style.bottom, 10) || 76,
-        };
+        st.fabPos = pos;
         saveSettings();
-      } else {
+      },
+      onClick: () => {
         panel.classList.toggle('yiyi-hidden');
         if (!panel.classList.contains('yiyi-hidden')) {
           syncPanelFromSettings();
+          syncTopLayer(panel, true, true);
           resolveStudioUrl();
+        } else {
+          syncTopLayer(panel, false);
         }
-      }
+      },
     });
 
-    document.getElementById('yiyi-panel-close').onclick = () => panel.classList.add('yiyi-hidden');
-    document.getElementById('yiyi-btn-test').onclick = async () => {
-      const st = getSettings();
-      const readInput = (id, key) => {
-        const el = document.getElementById(id);
-        if (el) st[key] = el.value;
-      };
-      readInput('yiyi-opt-policy', 'backendPolicy');
-      readInput('yiyi-opt-mac-url', 'macUrl');
-      readInput('yiyi-opt-local-url', 'localUrl');
-      readInput('yiyi-opt-remote-url', 'remoteUrl');
-      readInput('yiyi-opt-token', 'token');
-      saveSettings();
+    attachFixedDrag(document.getElementById('yiyi-ov-head'), viewer, {
+      anchorY: 'top',
+      minW: 200,
+      minH: 48,
+      ignoreSelector: '.yiyi-ov-actions, button',
+      onSavePos: (pos) => {
+        const st = getSettings();
+        st.overlayPos = pos;
+        saveSettings();
+      },
+    });
 
-      const res = await resolveStudioUrl();
-      if (res?.ok) {
-        const modeLabel = activeEndpointMode === 'local'
-          ? 'Windows 本机 4060'
-          : activeEndpointMode === 'remote'
-            ? 'Windows 远程 4060'
-            : 'Mac 24h 极速';
-        toastInfo(`连接成功 (${modeLabel})`, 'success');
-      } else {
-        const target = res?.url ? ` [${res.url}]` : '';
-        toastInfo(
-          `${res?.detail || '暂未连上生图服务，请检查网络与服务状态'}${target}`,
-          res?.reason === 'auth_error' ? 'error' : 'warning',
-        );
-      }
-    };
-    document.getElementById('yiyi-btn-draw-last').onclick = () => {
-      const ctx = getCtx();
-      const chat = ctx?.chat || [];
-      for (let i = chat.length - 1; i >= 0; i--) {
-        if (!chat[i].is_user && !chat[i].is_system) {
-          illustrateFloor(i, true);
-          return;
+    const fabDrawBtn = document.getElementById('yiyi-fab-draw');
+    if (fabDrawBtn) {
+      fabDrawBtn.onclick = (e) => {
+        e.stopPropagation();
+        drawLatestFloor();
+      };
+    }
+    const fabGalleryBtn = document.getElementById('yiyi-fab-gallery');
+    if (fabGalleryBtn) {
+      fabGalleryBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (viewer.classList.contains('yiyi-hidden')) showOverlayViewer();
+        else hideOverlayViewer();
+      };
+    }
+
+    const closeBtn = document.getElementById('yiyi-panel-close');
+    if (closeBtn) {
+      closeBtn.onclick = () => {
+        syncTopLayer(panel, false);
+        panel.classList.add('yiyi-hidden');
+      };
+    }
+    const testBtn = document.getElementById('yiyi-btn-test');
+    if (testBtn) {
+      testBtn.onclick = async () => {
+        const st = getSettings();
+        const readInput = (id, key) => {
+          const el = document.getElementById(id);
+          if (el) st[key] = el.value;
+        };
+        readInput('yiyi-opt-policy', 'backendPolicy');
+        readInput('yiyi-opt-mac-url', 'macUrl');
+        readInput('yiyi-opt-local-url', 'localUrl');
+        readInput('yiyi-opt-remote-url', 'remoteUrl');
+        readInput('yiyi-opt-token', 'token');
+        saveSettings();
+
+        const res = await resolveStudioUrl();
+        if (res?.ok) {
+          const modeLabel = activeEndpointMode === 'local'
+            ? 'Windows 本机 4060'
+            : activeEndpointMode === 'remote'
+              ? 'Windows 远程 4060'
+              : 'Mac 24h 极速';
+          toastInfo(`连接成功 (${modeLabel})`, 'success');
+        } else {
+          const target = res?.url ? ` [${res.url}]` : '';
+          toastInfo(
+            `${res?.detail || '暂未连上生图服务，请检查网络与服务状态'}${target}`,
+            res?.reason === 'auth_error' ? 'error' : 'warning',
+          );
         }
-      }
-      toastInfo('当前对话还没有可绘制的 AI 楼层', 'info');
+      };
+    }
+
+    const drawLastBtn = document.getElementById('yiyi-btn-draw-last');
+    if (drawLastBtn) drawLastBtn.onclick = drawLatestFloor;
+    const panelGalleryBtn = document.getElementById('yiyi-btn-gallery');
+    if (panelGalleryBtn) panelGalleryBtn.onclick = () => showOverlayViewer();
+
+    const stepOverlay = (delta) => {
+      const items = collectChatIllustrations();
+      if (!items.length) return;
+      overlayIndex = (overlayIndex + delta + items.length) % items.length;
+      renderOverlayViewer();
     };
+    const ovPrev = document.getElementById('yiyi-ov-prev');
+    const ovNext = document.getElementById('yiyi-ov-next');
+    const ovRedraw = document.getElementById('yiyi-ov-redraw');
+    const ovZoom = document.getElementById('yiyi-ov-zoom');
+    const ovCollapse = document.getElementById('yiyi-ov-collapse');
+    const ovClose = document.getElementById('yiyi-ov-close');
+    const ovDrawLast = document.getElementById('yiyi-ov-draw-last');
+    const lbClose = document.getElementById('yiyi-lb-close');
+
+    if (ovPrev) ovPrev.onclick = () => stepOverlay(-1);
+    if (ovNext) ovNext.onclick = () => stepOverlay(1);
+    if (ovRedraw) {
+      ovRedraw.onclick = () => {
+        const mid = ovRedraw.dataset?.mesId;
+        if (mid !== '' && mid !== undefined) illustrateFloor(Number(mid), true);
+        else drawLatestFloor();
+      };
+    }
+    if (ovZoom) {
+      ovZoom.onclick = () => {
+        if (ovZoom.dataset?.url) openLightbox(ovZoom.dataset.url);
+      };
+    }
+    if (ovCollapse) {
+      ovCollapse.onclick = () => {
+        overlayCollapsed = !overlayCollapsed;
+        viewer.classList.toggle('yiyi-ov-collapsed', overlayCollapsed);
+        ovCollapse.textContent = overlayCollapsed ? '▢' : '—';
+      };
+    }
+    if (ovClose) ovClose.onclick = hideOverlayViewer;
+    if (ovDrawLast) ovDrawLast.onclick = drawLatestFloor;
+    if (lbClose) lbClose.onclick = closeLightbox;
+    lightbox.addEventListener('click', (e) => {
+      if (e.target === lightbox) closeLightbox();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !lightbox.classList.contains('yiyi-hidden')) {
+        closeLightbox();
+      }
+    });
+    document.addEventListener('toggle', (e) => {
+      if (String(e?.target?.id || '').startsWith('yiyi-')) return;
+      setTimeout(promoteHudAbovePopovers, 30);
+    }, true);
 
     const bindVal = (id, key, isCheck = false, refreshConn = false) => {
       const el = document.getElementById(id);
@@ -1518,6 +1993,7 @@
     bindVal('yiyi-opt-ratio', 'ratio');
     bindVal('yiyi-opt-style', 'stylePrefix');
     bindVal('yiyi-opt-memory-mode', 'memoryMode');
+    bindVal('yiyi-opt-overlay-mode', 'overlayMode');
     bindVal('yiyi-opt-hires', 'hiresFix', true);
     bindVal('yiyi-opt-skip-first', 'skipFirstMessage', true);
     bindVal('yiyi-opt-silent', 'silentOffline', true);
@@ -1527,6 +2003,7 @@
     bindVal('yiyi-opt-token', 'token', false, true);
 
     syncPanelFromSettings();
+    updateGalleryBadge();
   }
 
   function syncPanelFromSettings() {
@@ -1545,6 +2022,7 @@
     setVal('yiyi-opt-ratio', s.ratio);
     setVal('yiyi-opt-style', s.stylePrefix);
     setVal('yiyi-opt-memory-mode', s.memoryMode || (s.autoWorldLore === false ? 'off' : 'smart'));
+    setVal('yiyi-opt-overlay-mode', s.overlayMode || 'auto');
     setVal('yiyi-opt-hires', s.hiresFix, true);
     setVal('yiyi-opt-skip-first', s.skipFirstMessage, true);
     setVal('yiyi-opt-silent', s.silentOffline, true);
@@ -1563,7 +2041,17 @@
     eventSource.on(eventTypes.MESSAGE_RECEIVED, (mesId, type) => {
       const s = getSettings();
       if (s.skipFirstMessage && type === 'first_message') return;
-      pendingAutoIds.add(Number(mesId));
+      const idNum = Number(mesId);
+      pendingAutoIds.add(idNum);
+      if (s.enabled) {
+        setTimeout(() => {
+          if (pendingAutoIds.has(idNum)) {
+            pendingAutoIds.delete(idNum);
+            const curSettings = getSettings();
+            if (curSettings.enabled) illustrateFloor(idNum, false);
+          }
+        }, 1200);
+      }
     });
 
     eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, (mesId) => {
@@ -1581,6 +2069,12 @@
       setTimeout(() => {
         injectAllVisibleFloorButtons();
         syncPanelFromSettings();
+        updateGalleryBadge();
+        const viewer = document.getElementById('yiyi-overlay-viewer');
+        if (viewer && !viewer.classList.contains('yiyi-hidden')) {
+          renderOverlayViewer();
+        }
+        promoteHudAbovePopovers();
       }, 250);
     });
   }
@@ -1603,6 +2097,9 @@
     buildFloatingUi();
     registerEvents();
     injectAllVisibleFloorButtons();
+    updateGalleryBadge();
+    promoteHudAbovePopovers();
+    setTimeout(promoteHudAbovePopovers, 800);
     resolveStudioUrl().catch(() => {});
   }
 
