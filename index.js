@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.6.0';
+  const EXT_VERSION = '1.6.1';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -969,12 +969,15 @@
         const data = res.data || {};
         if (data.isUpToDate === false) {
           updateAvailable = false;
-          toastInfo(`✅ 扩展已更新 (${data.shortCommitHash || '最新'})，1.5 秒后自动刷新生效…`, 'success');
-          setTimeout(() => window.location?.reload?.(), 1500);
+          toastInfo(`✅ 扩展已更新 (${data.shortCommitHash || '最新'})，正在自动刷新酒馆生效…`, 'success');
+          setTimeout(() => window.location?.reload?.(), 1000);
           return { updated: true, reloaded: true };
         }
         if (remoteLatestVersion && compareSemver(remoteLatestVersion, EXT_VERSION) > 0) {
-          toastInfo(`当前 Git 暂未拉到 v${remoteLatestVersion}（可能是代理缓存延迟），可稍后再试`, 'warning');
+          updateAvailable = false;
+          toastInfo(`✅ 本地扩展已是新版 (v${remoteLatestVersion})，正在自动刷新酒馆加载新版本…`, 'success');
+          setTimeout(() => window.location?.reload?.(), 1000);
+          return { updated: false, reloaded: true, upToDate: true };
         } else {
           updateAvailable = false;
           toastInfo(`✅ 当前已是最新版本 (v${EXT_VERSION})`, 'success');
@@ -986,6 +989,8 @@
         toastInfo('全局扩展需要管理员账号才能在网页更新，请改用管理员登录或到服务端拉取', 'warning');
       } else if (res.status === 404) {
         toastInfo('当前可能是压缩包/油猴手动安装，请从 SillyTavern 扩展管理用 Git 链接安装，或重新导入新版压缩包', 'warning');
+      } else if (res.status === 500) {
+        toastInfo('更新失败 (500)：酒馆后台 Git 拉取 GitHub 出错（请检查酒馆设备的 GitHub 网络、代理或 ~/.gitconfig 加速规则）', 'error');
       } else if (res.text === 'timeout') {
         toastInfo('拉取 GitHub 更新超时，请稍后重试或检查酒馆网络代理', 'error');
       } else {
