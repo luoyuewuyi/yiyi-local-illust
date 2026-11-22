@@ -1,5 +1,7 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
+  const EXT_VERSION = '1.6.0';
+  const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
   const BUILTIN_MAC_URLS = new Set([
@@ -16,7 +18,7 @@
     remoteUrl: '',
     macUrl: DEFAULT_MAC_HTTPS_URL,
     token: '',
-    engine: 'anima',
+    engine: 'anima_turbo',
     ratingMode: 'unrestricted',
     promptMode: 'auto_or_tag',
     ratio: '832x1216',
@@ -38,6 +40,12 @@
   let activeProgressLabel = '';
   let overlayIndex = 0;
   let overlayCollapsed = false;
+  let remoteLatestVersion = '';
+  let updateAvailable = false;
+  let updateCommitHint = '';
+  let updateNotified = false;
+  let detectedExtGlobal = null;
+  let updateBusy = false;
   const pendingAutoIds = new Set();
   const runningFloorIds = new Set();
 
@@ -844,6 +852,166 @@
     return [{ url: normRaw, timeout: 6500 }];
   }
 
+  function compareSemver(a, b) {
+    const pa = String(a || '').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+    const pb = String(b || '').replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+    const len = Math.max(pa.length, pb.length, 3);
+    for (let i = 0; i < len; i++) {
+      const va = pa[i] || 0;
+      const vb = pb[i] || 0;
+      if (va !== vb) return va > vb ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function refreshUpdateUi() {
+    const verEl = document.getElementById('yiyi-ver-text');
+    const rowEl = document.getElementById('yiyi-update-row');
+    const btnEl = document.getElementById('yiyi-btn-update');
+    const fabEl = document.getElementById('yiyi-st-fab');
+    const newerVer = !!(remoteLatestVersion && compareSemver(remoteLatestVersion, EXT_VERSION) > 0);
+    const hasUpdate = !!(updateAvailable || newerVer);
+
+    if (fabEl) {
+      fabEl.classList.toggle('has-update', hasUpdate);
+    }
+    if (rowEl) {
+      rowEl.classList.toggle('is-available', hasUpdate);
+    }
+    if (verEl) {
+      if (hasUpdate) {
+        verEl.textContent = newerVer
+          ? `🆕 发现新版 v${remoteLatestVersion} (当前 v${EXT_VERSION})`
+          : `🆕 发现 Git 更新${updateCommitHint ? ` (${updateCommitHint})` : ''} · 当前 v${EXT_VERSION}`;
+      } else {
+        verEl.textContent = `当前 v${EXT_VERSION}（已是最新）`;
+      }
+    }
+    if (btnEl && !updateBusy) {
+      btnEl.textContent = hasUpdate ? '⬇️ 立即一键更新' : '🔄 一键更新';
+      btnEl.disabled = false;
+    }
+  }
+
+  async function postStExtApi(endpoint, timeoutMs = 15000) {
+    const ctx = getCtx();
+    if (!ctx || typeof ctx.getRequestHeaders !== 'function') {
+      return { ok: false, status: 0, text: 'missing_ctx' };
+    }
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders() || {});
+    const tryOrder = detectedExtGlobal === null ? [false, true] : [detectedExtGlobal];
+    let lastResp = null;
+    for (const isGlobal of tryOrder) {
+      const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+      try {
+        const resp = await fetch(`/api/extensions/${endpoint}`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ extensionName: EXT_FOLDER_NAME, global: isGlobal }),
+          signal: ctrl?.signal,
+        });
+        if (resp.ok) {
+          detectedExtGlobal = isGlobal;
+          const data = await resp.json().catch(() => ({}));
+          return { ok: true, status: resp.status, data, isGlobal };
+        }
+        const text = await resp.text().catch(() => '');
+        lastResp = { ok: false, status: resp.status, text, isGlobal };
+        if (resp.status !== 404) {
+          return lastResp;
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          status: 0,
+          text: err?.name === 'AbortError' ? 'timeout' : (err?.message || 'network_error'),
+        };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    return lastResp || { ok: false, status: 404, text: 'not_found' };
+  }
+
+  async function checkExtensionUpdate({ silent = true } = {}) {
+    const res = await postStExtApi('version', 12000);
+    if (res.ok && res.data && typeof res.data === 'object') {
+      if (res.data.isUpToDate === false) {
+        updateAvailable = true;
+        updateCommitHint = res.data.currentCommitHash ? String(res.data.currentCommitHash).slice(0, 7) : '';
+      } else if (res.data.isUpToDate === true) {
+        updateAvailable = false;
+      }
+    }
+    refreshUpdateUi();
+    const newerVer = !!(remoteLatestVersion && compareSemver(remoteLatestVersion, EXT_VERSION) > 0);
+    const hasUpdate = !!(updateAvailable || newerVer);
+    if (hasUpdate && (!silent || !updateNotified)) {
+      updateNotified = true;
+      const verSuffix = newerVer ? ` (v${remoteLatestVersion})` : '';
+      toastInfo(`发现依依生图新版本${verSuffix}，点开右下角悬浮窗即可一键更新`, 'info');
+    }
+    return { hasUpdate, remoteLatestVersion, gitChecked: !!res.ok };
+  }
+
+  async function triggerExtensionUpdate() {
+    if (updateBusy) return;
+    updateBusy = true;
+    const btnEl = document.getElementById('yiyi-btn-update');
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.textContent = '⏳ 更新中…';
+    }
+    try {
+      const res = await postStExtApi('update', 30000);
+      if (res.ok) {
+        const data = res.data || {};
+        if (data.isUpToDate === false) {
+          updateAvailable = false;
+          toastInfo(`✅ 扩展已更新 (${data.shortCommitHash || '最新'})，1.5 秒后自动刷新生效…`, 'success');
+          setTimeout(() => window.location?.reload?.(), 1500);
+          return { updated: true, reloaded: true };
+        }
+        if (remoteLatestVersion && compareSemver(remoteLatestVersion, EXT_VERSION) > 0) {
+          toastInfo(`当前 Git 暂未拉到 v${remoteLatestVersion}（可能是代理缓存延迟），可稍后再试`, 'warning');
+        } else {
+          updateAvailable = false;
+          toastInfo(`✅ 当前已是最新版本 (v${EXT_VERSION})`, 'success');
+        }
+        return { updated: false, upToDate: true };
+      }
+
+      if (res.status === 403) {
+        toastInfo('全局扩展需要管理员账号才能在网页更新，请改用管理员登录或到服务端拉取', 'warning');
+      } else if (res.status === 404) {
+        toastInfo('当前可能是压缩包/油猴手动安装，请从 SillyTavern 扩展管理用 Git 链接安装，或重新导入新版压缩包', 'warning');
+      } else if (res.text === 'timeout') {
+        toastInfo('拉取 GitHub 更新超时，请稍后重试或检查酒馆网络代理', 'error');
+      } else {
+        const msg = res.text && res.status ? `：${String(res.text).slice(0, 100)}` : '';
+        toastInfo(`更新失败 (${res.status || res.text || '未知错误'})${msg}`, 'error');
+      }
+      return { updated: false, error: res.status || res.text };
+    } finally {
+      updateBusy = false;
+      refreshUpdateUi();
+    }
+  }
+
+  function _markEndpointOnline(mode, res) {
+    activeStudioUrl = res.url;
+    activeEndpointMode = mode;
+    activeBusy = !!res.data?.busy;
+    lastConnError = null;
+    if (res.data?.latest_ext_version) {
+      remoteLatestVersion = String(res.data.latest_ext_version).trim();
+    }
+    updateConnectionUi();
+    refreshUpdateUi();
+    return res;
+  }
+
   async function resolveStudioUrl() {
     const s = getSettings();
     const policy = s.backendPolicy || 'mac';
@@ -854,27 +1022,13 @@
       const localUrl = String(s.localUrl || '').trim();
       if (localUrl) {
         const localRes = await pingEndpoint(localUrl, s.token, 1200);
-        if (localRes?.ok) {
-          activeStudioUrl = localRes.url;
-          activeEndpointMode = 'local';
-          activeBusy = !!localRes.data?.busy;
-          lastConnError = null;
-          updateConnectionUi();
-          return localRes;
-        }
+        if (localRes?.ok) return _markEndpointOnline('local', localRes);
         winErr = localRes;
       }
       const remoteUrl = String(s.remoteUrl || '').trim();
       if (remoteUrl) {
         const remoteRes = await pingEndpoint(remoteUrl, s.token, 4000);
-        if (remoteRes?.ok) {
-          activeStudioUrl = remoteRes.url;
-          activeEndpointMode = 'remote';
-          activeBusy = !!remoteRes.data?.busy;
-          lastConnError = null;
-          updateConnectionUi();
-          return remoteRes;
-        }
+        if (remoteRes?.ok) return _markEndpointOnline('remote', remoteRes);
         winErr = remoteRes;
       }
       if (!localUrl && !remoteUrl) {
@@ -894,14 +1048,7 @@
       const candidates = getMacProbeCandidates(s.macUrl);
       for (const cand of candidates) {
         const macRes = await pingEndpoint(cand.url, s.token, cand.timeout);
-        if (macRes?.ok) {
-          activeStudioUrl = macRes.url;
-          activeEndpointMode = 'mac';
-          activeBusy = !!macRes.data?.busy;
-          lastConnError = null;
-          updateConnectionUi();
-          return macRes;
-        }
+        if (macRes?.ok) return _markEndpointOnline('mac', macRes);
         macErr = macRes;
         if (macRes?.reason === 'auth_error' || macRes?.reason === 'comfy_offline') {
           break;
@@ -1450,6 +1597,11 @@
       const charName = mes.name || getActiveCharName();
       const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, s, mes.mes);
 
+      const selectedEngine = s.engine || 'anima_turbo';
+      const reqEngine = (activeEndpointMode === 'local' || activeEndpointMode === 'remote')
+        ? (selectedEngine === 'anima_turbo' ? 'anima' : selectedEngine === 'illustrious_fast' ? 'illustrious' : selectedEngine)
+        : selectedEngine;
+
       const startResp = await fetch(`${activeStudioUrl}/api/st/illustrate/start`, {
         method: 'POST',
         headers: buildHeaders(s),
@@ -1467,12 +1619,12 @@
           user_name: lore.userName,
           user_appearance: lore.userAppearance,
           prompt_mode: s.promptMode || 'auto_or_tag',
-          engine: s.engine || 'anima',
+          engine: reqEngine,
           rating_mode: s.ratingMode || 'unrestricted',
           width: parseInt(wStr, 10) || 832,
           height: parseInt(hStr, 10) || 1216,
-          steps: s.engine === 'illustrious' ? 24 : 26,
-          cfg: s.engine === 'illustrious' ? 6.0 : 4.5,
+          steps: reqEngine === 'illustrious' ? 24 : (reqEngine === 'anima_turbo' || reqEngine === 'illustrious_fast' ? 10 : 26),
+          cfg: reqEngine === 'anima_turbo' ? 1.0 : (reqEngine === 'illustrious' ? 5.5 : 4.5),
           hires_fix: !!s.hiresFix,
           return_base64: true,
           image_format: 'webp',
@@ -1487,7 +1639,7 @@
       // Poll job state cleanly (tolerates up to 3 transient mobile/Cloudflare blips)
       let jobData = null;
       let transientErrors = 0;
-      const deadline = Date.now() + 260000;
+      const deadline = Date.now() + 420000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 900));
         let jr;
@@ -1540,7 +1692,7 @@
       }
 
       if (!jobData || jobData.status !== 'done') {
-        throw new Error('生成超时（超过 4 分钟未完成），请检查服务端状态');
+        throw new Error('生成超时（超过 7 分钟未完成），请检查服务端状态');
       }
 
       const res = jobData.extra_result || {};
@@ -1682,6 +1834,10 @@
           <span id="yiyi-conn-status">检查连接中…</span>
           <button class="yiyi-btn" id="yiyi-btn-test">测试连接</button>
         </div>
+        <div class="yiyi-update-row" id="yiyi-update-row">
+          <span id="yiyi-ver-text">当前 v${EXT_VERSION}</span>
+          <button type="button" class="yiyi-btn" id="yiyi-btn-update">🔄 一键更新</button>
+        </div>
 
         <button class="yiyi-btn yiyi-btn-primary" id="yiyi-btn-draw-last">🖌️ 为最新楼层立即画一张</button>
         <button class="yiyi-btn" id="yiyi-btn-gallery">🖼️ 打开本局插画画廊（同层卡专用）</button>
@@ -1690,8 +1846,10 @@
           <div class="yiyi-field">
             <label>生图引擎</label>
             <select id="yiyi-opt-engine">
-              <option value="anima">Anima v1.1 (综合最强)</option>
-              <option value="illustrious">WAI-Illustrious v17</option>
+              <option value="anima_turbo">Anima-Turbo v1.1 (极速精绘 · 首选)</option>
+              <option value="anima">Anima-Aesthetic v1.1 (旗舰精绘 · 画质最强)</option>
+              <option value="illustrious">WAI-Illustrious v17 原版精绘 (24步无加速)</option>
+              <option value="illustrious_fast">WAI-v17 极速版 (保留原10步)</option>
             </select>
           </div>
           <div class="yiyi-field">
@@ -1920,6 +2078,8 @@
     if (drawLastBtn) drawLastBtn.onclick = drawLatestFloor;
     const panelGalleryBtn = document.getElementById('yiyi-btn-gallery');
     if (panelGalleryBtn) panelGalleryBtn.onclick = () => showOverlayViewer();
+    const updateBtn = document.getElementById('yiyi-btn-update');
+    if (updateBtn) updateBtn.onclick = () => { triggerExtensionUpdate().catch(() => {}); };
 
     const stepOverlay = (delta) => {
       const items = collectChatIllustrations();
@@ -2004,6 +2164,7 @@
 
     syncPanelFromSettings();
     updateGalleryBadge();
+    refreshUpdateUi();
   }
 
   function syncPanelFromSettings() {
@@ -2100,6 +2261,7 @@
     updateGalleryBadge();
     promoteHudAbovePopovers();
     setTimeout(promoteHudAbovePopovers, 800);
+    setTimeout(() => checkExtensionUpdate({ silent: true }).catch(() => {}), 2000);
     resolveStudioUrl().catch(() => {});
   }
 
