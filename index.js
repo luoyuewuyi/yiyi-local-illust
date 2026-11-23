@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.7.0';
+  const EXT_VERSION = '1.7.1';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -52,6 +52,10 @@
   let updateBusy = false;
   let layoutRafId = null;
   let responsiveListenersBound = false;
+  let hudResizeObserver = null;
+  const hudObservedEls = new WeakSet();
+  let cssBustAttempted = false;
+  let cssWatchBound = false;
   const pendingAutoIds = new Set();
   const runningFloorIds = new Set();
 
@@ -62,6 +66,9 @@
   function getSettings() {
     const ctx = getCtx();
     if (!ctx) return { ...DEFAULTS };
+    if (!ctx.extensionSettings || typeof ctx.extensionSettings !== 'object') {
+      ctx.extensionSettings = {};
+    }
     const raw = ctx.extensionSettings[EXT_KEY] || {};
     const merged = Object.assign({}, DEFAULTS, raw);
     const rawMac = typeof raw.macUrl === 'string' ? raw.macUrl.trim().replace(/\/+$/, '') : '';
@@ -1174,7 +1181,16 @@
         if (!el.matches?.(':popover-open')) {
           el.showPopover();
         }
-      } catch {}
+      } catch {
+        // showPopover() refused (unsupported / not connected / already in top layer elsewhere):
+        // never leave a stranded [popover] attribute behind, or the UA rule
+        // `[popover]:not(:popover-open) { display: none }` hides the HUD forever.
+        try {
+          if (!el.matches?.(':popover-open') && el.hasAttribute?.('popover')) {
+            el.removeAttribute('popover');
+          }
+        } catch {}
+      }
     }
   }
 
@@ -1185,7 +1201,7 @@
       const el = document.getElementById(id);
       if (!el) continue;
       const visible = !el.classList?.contains('yiyi-hidden');
-      if (!foreignOpen && el.matches?.(':popover-open')) {
+      if (!foreignOpen && (el.matches?.(':popover-open') || el.hasAttribute?.('popover'))) {
         syncTopLayer(el, false);
       } else if (foreignOpen && visible) {
         syncTopLayer(el, true, true);
@@ -1765,8 +1781,15 @@
   }
 
   function getViewportBox() {
-    const lw = Math.max(240, window.innerWidth || document.documentElement?.clientWidth || 1280);
-    const lh = Math.max(320, window.innerHeight || document.documentElement?.clientHeight || 800);
+    // documentElement.clientWidth/Height always report the layout viewport (excluding desktop
+    // scrollbars) even when SillyTavern's mobile CSS collapses <html> to height 0.
+    const de = document.documentElement;
+    const deW = Number(de?.clientWidth);
+    const deH = Number(de?.clientHeight);
+    const rawW = (Number.isFinite(deW) && deW > 0) ? deW : (window.innerWidth || 1280);
+    const rawH = (Number.isFinite(deH) && deH > 0) ? deH : (window.innerHeight || 800);
+    const lw = Math.max(240, rawW);
+    const lh = Math.max(320, rawH);
     const vv = window.visualViewport;
     if (vv && Number(vv.width) > 120 && Number(vv.height) > 120) {
       const width = Math.min(lw, Number(vv.width) || lw);
@@ -1799,12 +1822,27 @@
     if (!el || el.classList?.contains?.('yiyi-hidden')) {
       return { w: fallbackW, h: fallbackH };
     }
+    // FOUC guard: ST loads index.js and style.css in parallel. Until our stylesheet applies,
+    // the HUD is an unstyled full-width block — measuring it would misplace everything.
+    try {
+      if (typeof window.getComputedStyle === 'function') {
+        const cs = window.getComputedStyle(el);
+        if (cs && cs.position !== 'fixed') {
+          return { w: fallbackW, h: fallbackH };
+        }
+      }
+    } catch {}
     const r = el.getBoundingClientRect?.();
     const w = (r && r.width > 20) ? r.width : (el.offsetWidth > 20 ? el.offsetWidth : fallbackW);
     const h = (r && r.height > 20) ? r.height : (el.offsetHeight > 20 ? el.offsetHeight : fallbackH);
     return { w, h };
   }
 
+  // NOTE (v1.7.1): SillyTavern sets `html { transform: translateZ(0) }`, which makes <html> the
+  // containing block of every position:fixed element. On <=1000px ST also sets
+  // `body { position: fixed }`, collapsing <html> to height 0, so any `bottom:`-anchored box flies
+  // to negative Y (off-screen). We therefore ALWAYS write left/top and never bottom/right.
+  // `anchorY` is kept only for API compatibility (callers still persist logical bottom offsets).
   function placeFixedBox(el, left, top, w, h, anchorY, vp, minTopOverride = null) {
     if (!el) return null;
     const visRight = vp.left + vp.width;
@@ -1816,17 +1854,10 @@
     const maxTop = Math.max(minTop, visBottom - h - padY);
     const clampedLeft = Math.max(vp.left + padX, Math.min(maxLeft, left));
     const clampedTop = Math.max(minTop, Math.min(maxTop, top));
-    const rightCss = Math.round(vp.layoutW - (clampedLeft + w));
-    el.style.left = 'auto';
-    el.style.right = `${rightCss}px`;
-    if (anchorY === 'top') {
-      el.style.bottom = 'auto';
-      el.style.top = `${Math.round(clampedTop)}px`;
-    } else {
-      const bottomCss = Math.round(vp.layoutH - (clampedTop + h));
-      el.style.top = 'auto';
-      el.style.bottom = `${bottomCss}px`;
-    }
+    el.style.right = 'auto';
+    el.style.bottom = 'auto';
+    el.style.left = `${Math.round(clampedLeft)}px`;
+    el.style.top = `${Math.round(clampedTop)}px`;
     return { left: clampedLeft, top: clampedTop, right: clampedLeft + w, bottom: clampedTop + h, w, h };
   }
 
@@ -1837,6 +1868,7 @@
     const viewer = document.getElementById('yiyi-overlay-viewer');
     const lightbox = document.getElementById('yiyi-lightbox');
     if (!fab && !panel && !viewer && !floatProg) return;
+    ensureHudObservers();
 
     const vp = getViewportBox();
     const isMobile = vp.width <= 768;
@@ -1869,10 +1901,13 @@
         const rightGutter = sheld ? (visRight - sheld.right) : 0;
         if (sheld && rightGutter >= fabSize.w + 24) {
           fabLeft = sheld.right + 14;
+          fabTop = visBottom - 76 - fabSize.h;
         } else {
+          // No room beside #sheld (769–1000px tablets, ST mobile layout, chat_width 100):
+          // the FAB floats over the chat column, so keep it clear of #send_form.
           fabLeft = visRight - fabSize.w - 14;
+          fabTop = visBottom - Math.max(72, sendFormH + 14) - fabSize.h;
         }
-        fabTop = visBottom - 76 - fabSize.h;
       }
       fabBox = placeFixedBox(fab, fabLeft, fabTop, fabSize.w, fabSize.h, 'bottom', vp, minHudTop) || fabBox;
     }
@@ -1958,20 +1993,127 @@
     }
   }
 
+  function ensureHudObservers() {
+    if (typeof ResizeObserver !== 'function') return;
+    try {
+      if (!hudResizeObserver) hudResizeObserver = new ResizeObserver(() => scheduleResponsiveLayout());
+      // #sheld may not be mounted yet on the first pass, and HUD boxes change size when CSS
+      // arrives late or their text (state tag / progress) changes — keep observing all of them.
+      const ids = ['sheld', 'yiyi-st-fab', 'yiyi-st-panel', 'yiyi-float-progress', 'yiyi-overlay-viewer'];
+      for (const id of ids) {
+        const node = document.getElementById?.(id);
+        if (node && !hudObservedEls.has(node)) {
+          hudObservedEls.add(node);
+          hudResizeObserver.observe(node);
+        }
+      }
+    } catch {}
+  }
+
   function bindResponsiveListeners() {
+    ensureHudObservers();
     if (responsiveListenersBound) return;
     responsiveListenersBound = true;
     try {
       window.addEventListener?.('resize', scheduleResponsiveLayout);
       window.addEventListener?.('orientationchange', () => setTimeout(layoutResponsiveHud, 120));
+      window.addEventListener?.('load', () => {
+        ensureFreshCss();
+        scheduleResponsiveLayout();
+      });
       window.visualViewport?.addEventListener?.('resize', scheduleResponsiveLayout);
       window.visualViewport?.addEventListener?.('scroll', scheduleResponsiveLayout);
-      const sheldEl = document.getElementById?.('sheld');
-      if (sheldEl && typeof ResizeObserver === 'function') {
-        const ro = new ResizeObserver(scheduleResponsiveLayout);
-        ro.observe(sheldEl);
-      }
     } catch {}
+  }
+
+  function getCssLinkEl() {
+    try {
+      return document.getElementById?.('third-party_yiyi-local-illust-css')
+        || document.querySelector?.(`link[rel="stylesheet"][href*="/${EXT_FOLDER_NAME}/style.css"]`)
+        || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function readCssVersion() {
+    try {
+      if (typeof window.getComputedStyle !== 'function' || !document.documentElement) return null;
+      const cs = window.getComputedStyle(document.documentElement);
+      if (!cs || typeof cs.getPropertyValue !== 'function') return null;
+      return String(cs.getPropertyValue('--yiyi-css-ver') || '').trim().replace(/^["']|["']$/g, '').trim();
+    } catch {
+      return null;
+    }
+  }
+
+  function bustStaleCss(link) {
+    if (cssBustAttempted || !link) return false;
+    cssBustAttempted = true;
+    try {
+      const rawHref = String(link.getAttribute?.('href') || link.href || '');
+      if (!rawHref) return false;
+      const base = rawHref.replace(/[?#].*$/, '');
+      const fresh = document.createElement('link');
+      fresh.rel = 'stylesheet';
+      fresh.type = 'text/css';
+      fresh.href = `${base}?v=${encodeURIComponent(EXT_VERSION)}`;
+      fresh.addEventListener?.('load', () => {
+        // Swap in place so ST can still find/remove us by the original id.
+        const oldId = link.id;
+        try {
+          if (typeof link.remove === 'function') link.remove();
+          else link.parentNode?.removeChild?.(link);
+        } catch {}
+        if (oldId) fresh.id = oldId;
+        scheduleResponsiveLayout();
+        setTimeout(layoutResponsiveHud, 60);
+      });
+      fresh.addEventListener?.('error', () => {
+        try {
+          if (typeof fresh.remove === 'function') fresh.remove();
+          else fresh.parentNode?.removeChild?.(fresh);
+        } catch {}
+      });
+      if (link.parentNode?.insertBefore) {
+        link.parentNode.insertBefore(fresh, link.nextSibling || null);
+      } else {
+        (document.head || document.body)?.appendChild?.(fresh);
+      }
+      console.info?.(`[yiyi-local-illust] stale style.css detected (want ${EXT_VERSION}), reloading ${fresh.href}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Cloudflare/browser caches may serve an old style.css next to a fresh index.js (no ?v= from ST).
+  // style.css carries `:root { --yiyi-css-ver }`; if it doesn't match EXT_VERSION, reload it once.
+  function ensureFreshCss(opts = {}) {
+    const ver = readCssVersion();
+    if (ver === null) return false; // no getComputedStyle — nothing we can verify
+    if (ver === EXT_VERSION) return true;
+    const link = getCssLinkEl();
+    if (!link) return false; // userscript build (inline <style>) or ST hasn't injected it yet
+    let loaded = false;
+    try {
+      loaded = !!link.sheet;
+    } catch {
+      loaded = true;
+    }
+    if (!loaded && !opts.final) {
+      if (!cssWatchBound) {
+        cssWatchBound = true;
+        link.addEventListener?.('load', () => {
+          scheduleResponsiveLayout();
+          ensureFreshCss();
+        });
+        link.addEventListener?.('error', () => ensureFreshCss({ final: true }));
+        setTimeout(() => ensureFreshCss({ final: true }), 4000);
+      }
+      return false;
+    }
+    return bustStaleCss(link);
   }
 
   function attachFixedDrag(handleEl, targetEl, opts = {}) {
@@ -1988,32 +2130,39 @@
     let dragW = minW;
     let dragH = minH;
     let lastPlaced = null;
+    let activePointerId = null;
+
+    const releaseCapture = (pointerId) => {
+      try {
+        if (pointerId !== null && pointerId !== undefined) handleEl.releasePointerCapture?.(pointerId);
+      } catch {}
+    };
 
     handleEl.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (e.isPrimary === false) return;
       if (opts.ignoreSelector && e.target?.closest?.(opts.ignoreSelector)) return;
       dragging = true;
       moved = false;
       lastPlaced = null;
+      activePointerId = e.pointerId;
       startX = e.clientX;
       startY = e.clientY;
       const vp = getViewportBox();
       const rect = targetEl.getBoundingClientRect?.();
       dragW = (rect && rect.width > 20) ? rect.width : minW;
       dragH = (rect && rect.height > 20) ? rect.height : minH;
-      const parsedRight = parseFloat(targetEl.style.right);
+      const parsedLeft = parseFloat(targetEl.style.left);
       const parsedTop = parseFloat(targetEl.style.top);
-      const parsedBottom = parseFloat(targetEl.style.bottom);
-      origLeft = Number.isFinite(parsedRight)
-        ? (vp.layoutW - parsedRight - dragW)
+      origLeft = Number.isFinite(parsedLeft)
+        ? parsedLeft
         : (rect ? rect.left : (vp.left + vp.width - dragW - 14));
-      if (anchorY === 'top') {
-        origTop = Number.isFinite(parsedTop) ? parsedTop : (rect ? rect.top : (vp.top + 64));
-      } else {
-        origTop = Number.isFinite(parsedBottom)
-          ? (vp.layoutH - parsedBottom - dragH)
-          : (rect ? rect.top : (vp.top + vp.height - dragH - 76));
-      }
-      handleEl.setPointerCapture?.(e.pointerId);
+      origTop = Number.isFinite(parsedTop)
+        ? parsedTop
+        : (rect ? rect.top : (anchorY === 'top' ? (vp.top + 64) : (vp.top + vp.height - dragH - 76)));
+      try {
+        handleEl.setPointerCapture?.(e.pointerId);
+      } catch {}
     });
     handleEl.addEventListener('pointermove', (e) => {
       if (!dragging) return;
@@ -2027,7 +2176,8 @@
     handleEl.addEventListener('pointerup', (e) => {
       if (!dragging) return;
       dragging = false;
-      handleEl.releasePointerCapture?.(e.pointerId);
+      releaseCapture(e.pointerId ?? activePointerId);
+      activePointerId = null;
       if (moved) {
         const vp = getViewportBox();
         const placed = lastPlaced || { left: origLeft, top: origTop, w: dragW, h: dragH };
@@ -2044,6 +2194,17 @@
       } else {
         opts.onClick?.(e);
       }
+    });
+    handleEl.addEventListener('pointercancel', (e) => {
+      if (!dragging) return;
+      const wasMoved = moved;
+      dragging = false;
+      moved = false;
+      lastPlaced = null;
+      releaseCapture(e?.pointerId ?? activePointerId);
+      activePointerId = null;
+      // Gesture interrupted by the browser: snap back to the saved/responsive position.
+      if (wasMoved) layoutResponsiveHud();
     });
   }
 
@@ -2426,6 +2587,7 @@
     refreshUpdateUi();
     layoutResponsiveHud();
     bindResponsiveListeners();
+    ensureFreshCss();
     setTimeout(layoutResponsiveHud, 120);
   }
 
@@ -2460,6 +2622,14 @@
     const ctx = getCtx();
     if (!ctx?.eventSource || !ctx?.eventTypes) return;
     const { eventSource, eventTypes } = ctx;
+
+    if (eventTypes.APP_READY) {
+      eventSource.on(eventTypes.APP_READY, () => {
+        ensureFreshCss();
+        promoteHudAbovePopovers();
+        scheduleResponsiveLayout();
+      });
+    }
 
     eventSource.on(eventTypes.MESSAGE_RECEIVED, (mesId, type) => {
       const s = getSettings();
@@ -2507,6 +2677,10 @@
     const ctx = getCtx();
     if (!ctx) {
       setTimeout(init, 600);
+      return;
+    }
+    if (!document.body) {
+      setTimeout(init, 400);
       return;
     }
     const existingRaw = ctx.extensionSettings?.[EXT_KEY];

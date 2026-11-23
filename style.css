@@ -1,9 +1,18 @@
+/* CSS freshness marker: index.js compares this with EXT_VERSION and cache-busts a stale sheet. */
+:root {
+  --yiyi-css-ver: "1.7.1";
+}
+
+/* v1.7.1: SillyTavern's `html { transform: translateZ(0) }` makes <html> the containing block of
+   position:fixed boxes, and on <=1000px `body { position: fixed }` collapses <html> to height 0.
+   `bottom:` therefore resolves against a 0px-tall box and flies off-screen — anchor with `top:`. */
 #yiyi-st-fab {
   position: fixed;
   right: 16px;
-  bottom: 76px;
   left: auto;
-  top: auto;
+  top: calc(100vh - 114px);
+  top: calc(100dvh - 114px);
+  bottom: auto;
   margin: 0;
   z-index: 2147483641;
   display: inline-flex;
@@ -102,9 +111,11 @@
 #yiyi-st-panel {
   position: fixed;
   right: 14px;
-  bottom: 124px;
   left: auto;
-  top: auto;
+  top: 8px;
+  top: max(8px, calc(100vh - 124px - 76vh));
+  top: max(8px, calc(100dvh - 124px - 76vh));
+  bottom: auto;
   margin: 0;
   z-index: 2147483643;
   width: 326px;
@@ -131,6 +142,9 @@
 #yiyi-lightbox:popover-open {
   margin: 0;
   border-width: 1px;
+}
+#yiyi-st-fab:popover-open {
+  overflow: visible;
 }
 
 .yiyi-panel-head {
@@ -180,6 +194,7 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+  touch-action: pan-y;
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -369,9 +384,10 @@
 #yiyi-float-progress {
   position: fixed;
   right: 16px;
-  bottom: 124px;
   left: auto;
-  top: auto;
+  top: calc(100vh - 168px);
+  top: calc(100dvh - 168px);
+  bottom: auto;
   margin: 0;
   z-index: 2147483642;
   width: 248px;
@@ -489,6 +505,7 @@
   flex-direction: column;
   gap: 6px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  touch-action: pan-y;
 }
 .yiyi-ov-meta-row {
   display: flex;
@@ -506,7 +523,13 @@
 
 #yiyi-lightbox {
   position: fixed;
-  inset: 0;
+  left: 0;
+  top: 0;
+  right: auto;
+  bottom: auto;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
   margin: 0;
   z-index: 2147483646;
   background: rgba(6, 9, 18, 0.88);
