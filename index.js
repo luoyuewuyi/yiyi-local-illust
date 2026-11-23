@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.6.1';
+  const EXT_VERSION = '1.7.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -29,8 +29,12 @@
     memoryMode: 'smart', // 'smart' | 'story_only' | 'off'
     overlayMode: 'auto', // 'auto' | 'always' | 'floor_only'
     overlayPos: null,
+    overlayPosDesktop: null,
+    overlayPosMobile: null,
     stylePrefix: '',
     fabPos: null,
+    fabPosDesktop: null,
+    fabPosMobile: null,
   };
 
   let activeStudioUrl = null;
@@ -46,6 +50,8 @@
   let updateNotified = false;
   let detectedExtGlobal = null;
   let updateBusy = false;
+  let layoutRafId = null;
+  let responsiveListenersBound = false;
   const pendingAutoIds = new Set();
   const runningFloorIds = new Set();
 
@@ -94,8 +100,8 @@
       }
     }
     s = s
-      .replace(/<(?:think|thinking|thought)>[\s\S]*?<\/(?:think|thinking|thought)>/gi, '')
-      .replace(/<(?:style|script|head|svg|template|noscript|details|UpdateVariable|Variable|variables|statusbar|status|options|choices|mvu|JSONPatch|tableEdit)\b[^>]*>[\s\S]*?<\/(?:style|script|head|svg|template|noscript|details|UpdateVariable|Variable|variables|statusbar|status|options|choices|mvu|JSONPatch|tableEdit)>/gi, '')
+      .replace(/<(think[a-z0-9_-]*|thinking|thought|cot|reasoning|scratchpad|inner_monologue)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+      .replace(/<(style|script|head|svg|template|noscript|details|UpdateVariable|Variable|variables|statusbar|status|options|choices|mvu|JSONPatch|tableEdit)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
       .replace(/```(?:html|css|js|javascript|json|yaml|yml|mvu|updatevariable|status|statusbar)\b[\s\S]*?```/gi, '')
       .replace(/<!--[\s\S]*?-->/g, '')
       .replace(/<br\s*\/?>|<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
@@ -1383,6 +1389,7 @@
     if (collapseBtn) collapseBtn.textContent = '—';
     renderOverlayViewer(preferredMesId);
     syncTopLayer(viewer, true, true);
+    layoutResponsiveHud();
   }
 
   function hideOverlayViewer() {
@@ -1406,6 +1413,7 @@
         fill.style.width = `${Math.max(5, Math.min(100, pct))}%`;
       }
       syncTopLayer(pill, true);
+      layoutResponsiveHud();
     }
   }
 
@@ -1756,6 +1764,216 @@
     });
   }
 
+  function getViewportBox() {
+    const lw = Math.max(240, window.innerWidth || document.documentElement?.clientWidth || 1280);
+    const lh = Math.max(320, window.innerHeight || document.documentElement?.clientHeight || 800);
+    const vv = window.visualViewport;
+    if (vv && Number(vv.width) > 120 && Number(vv.height) > 120) {
+      const width = Math.min(lw, Number(vv.width) || lw);
+      const height = Math.min(lh, Number(vv.height) || lh);
+      const left = Math.max(0, Math.min(lw - width, Number(vv.offsetLeft) || 0));
+      const top = Math.max(0, Math.min(lh - height, Number(vv.offsetTop) || 0));
+      return { layoutW: lw, layoutH: lh, left, top, width, height, scale: Number(vv.scale) || 1 };
+    }
+    return { layoutW: lw, layoutH: lh, left: 0, top: 0, width: lw, height: lh, scale: 1 };
+  }
+
+  function getSheldBounds(vp) {
+    const sheldEl = document.getElementById?.('sheld');
+    const topBarEl = document.getElementById?.('top-bar') || document.getElementById?.('top-settings-holder');
+    const sendFormEl = document.getElementById?.('send_form') || document.getElementById?.('form_sheld');
+    const sr = sheldEl?.getBoundingClientRect?.();
+    const tr = topBarEl?.getBoundingClientRect?.();
+    const fr = sendFormEl?.getBoundingClientRect?.();
+    const sheldValid = sr && sr.width >= 200 && sr.height >= 120;
+    const rawTopBar = tr && tr.height >= 24 && tr.height <= 120 ? Math.round(tr.bottom - vp.top) : 44;
+    const rawSendForm = fr && fr.height >= 28 && fr.height <= 180 ? Math.round(fr.height) : 56;
+    return {
+      sheld: sheldValid ? sr : null,
+      topBarH: Math.max(0, Math.min(120, rawTopBar)),
+      sendFormH: Math.max(36, Math.min(160, rawSendForm)),
+    };
+  }
+
+  function measureElSize(el, fallbackW, fallbackH) {
+    if (!el || el.classList?.contains?.('yiyi-hidden')) {
+      return { w: fallbackW, h: fallbackH };
+    }
+    const r = el.getBoundingClientRect?.();
+    const w = (r && r.width > 20) ? r.width : (el.offsetWidth > 20 ? el.offsetWidth : fallbackW);
+    const h = (r && r.height > 20) ? r.height : (el.offsetHeight > 20 ? el.offsetHeight : fallbackH);
+    return { w, h };
+  }
+
+  function placeFixedBox(el, left, top, w, h, anchorY, vp, minTopOverride = null) {
+    if (!el) return null;
+    const visRight = vp.left + vp.width;
+    const visBottom = vp.top + vp.height;
+    const padX = vp.width <= 768 ? 8 : 10;
+    const padY = 8;
+    const minTop = minTopOverride !== null ? Math.max(vp.top + padY, minTopOverride) : (vp.top + padY);
+    const maxLeft = Math.max(vp.left + padX, visRight - w - padX);
+    const maxTop = Math.max(minTop, visBottom - h - padY);
+    const clampedLeft = Math.max(vp.left + padX, Math.min(maxLeft, left));
+    const clampedTop = Math.max(minTop, Math.min(maxTop, top));
+    const rightCss = Math.round(vp.layoutW - (clampedLeft + w));
+    el.style.left = 'auto';
+    el.style.right = `${rightCss}px`;
+    if (anchorY === 'top') {
+      el.style.bottom = 'auto';
+      el.style.top = `${Math.round(clampedTop)}px`;
+    } else {
+      const bottomCss = Math.round(vp.layoutH - (clampedTop + h));
+      el.style.top = 'auto';
+      el.style.bottom = `${bottomCss}px`;
+    }
+    return { left: clampedLeft, top: clampedTop, right: clampedLeft + w, bottom: clampedTop + h, w, h };
+  }
+
+  function layoutResponsiveHud() {
+    const fab = document.getElementById('yiyi-st-fab');
+    const panel = document.getElementById('yiyi-st-panel');
+    const floatProg = document.getElementById('yiyi-float-progress');
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    const lightbox = document.getElementById('yiyi-lightbox');
+    if (!fab && !panel && !viewer && !floatProg) return;
+
+    const vp = getViewportBox();
+    const isMobile = vp.width <= 768;
+    const isNarrow = vp.width <= 460;
+    const visRight = vp.left + vp.width;
+    const visBottom = vp.top + vp.height;
+    const { sheld, topBarH, sendFormH } = getSheldBounds(vp);
+    const minHudTop = vp.top + Math.min(topBarH + 6, Math.max(8, vp.height * 0.2));
+    const s = getSettings();
+
+    for (const el of [fab, panel, floatProg, viewer, lightbox]) {
+      if (!el?.classList) continue;
+      el.classList.toggle('yiyi-mobile', isMobile);
+      el.classList.toggle('yiyi-mobile-narrow', isNarrow);
+    }
+
+    let fabBox = { left: visRight - 168 - 14, top: visBottom - 76 - 38, right: visRight - 14, bottom: visBottom - 76, w: 168, h: 38 };
+    if (fab) {
+      const fabSize = measureElSize(fab, isNarrow ? 112 : 168, 38);
+      const savedFab = isMobile ? s.fabPosMobile : s.fabPosDesktop;
+      let fabLeft;
+      let fabTop;
+      if (savedFab && typeof savedFab.right === 'number' && typeof savedFab.bottom === 'number') {
+        fabLeft = visRight - savedFab.right - fabSize.w;
+        fabTop = visBottom - savedFab.bottom - fabSize.h;
+      } else if (isMobile) {
+        fabLeft = visRight - fabSize.w - 10;
+        fabTop = visBottom - Math.max(72, sendFormH + 14) - fabSize.h;
+      } else {
+        const rightGutter = sheld ? (visRight - sheld.right) : 0;
+        if (sheld && rightGutter >= fabSize.w + 24) {
+          fabLeft = sheld.right + 14;
+        } else {
+          fabLeft = visRight - fabSize.w - 14;
+        }
+        fabTop = visBottom - 76 - fabSize.h;
+      }
+      fabBox = placeFixedBox(fab, fabLeft, fabTop, fabSize.w, fabSize.h, 'bottom', vp, minHudTop) || fabBox;
+    }
+
+    if (viewer) {
+      const targetOvW = isMobile ? Math.max(240, Math.min(360, Math.round(vp.width - 16))) : 310;
+      viewer.style.width = isMobile ? `${targetOvW}px` : '';
+      const ovSize = measureElSize(viewer, targetOvW, overlayCollapsed ? 44 : (isMobile ? 320 : 360));
+      const vW = isMobile ? targetOvW : ovSize.w;
+      const vH = ovSize.h;
+      const savedOv = isMobile ? s.overlayPosMobile : s.overlayPosDesktop;
+      let ovLeft;
+      let ovTop;
+      if (savedOv && typeof savedOv.right === 'number' && typeof savedOv.top === 'number') {
+        ovLeft = visRight - savedOv.right - vW;
+        ovTop = vp.top + savedOv.top;
+      } else if (isMobile) {
+        ovLeft = vp.left + Math.round((vp.width - vW) / 2);
+        ovTop = minHudTop;
+      } else {
+        const rightGutter = sheld ? (visRight - sheld.right) : 0;
+        if (sheld && rightGutter >= vW + 24) {
+          ovLeft = sheld.right + 14;
+        } else {
+          ovLeft = visRight - vW - 14;
+        }
+        ovTop = Math.max(vp.top + 64, minHudTop);
+      }
+      placeFixedBox(viewer, ovLeft, ovTop, vW, vH, 'top', vp, minHudTop);
+    }
+
+    if (panel) {
+      if (isMobile) {
+        const panelW = Math.max(240, Math.min(440, Math.round(vp.width - 16)));
+        const panelMaxH = Math.max(260, Math.round(vp.height - (minHudTop - vp.top) - 14));
+        panel.style.width = `${panelW}px`;
+        panel.style.maxHeight = `${panelMaxH}px`;
+        const pH = Math.min(panelMaxH, measureElSize(panel, panelW, Math.min(480, panelMaxH)).h);
+        const pLeft = vp.left + Math.round((vp.width - panelW) / 2);
+        const pTop = visBottom - 10 - pH;
+        placeFixedBox(panel, pLeft, pTop, panelW, pH, 'bottom', vp, minHudTop);
+      } else {
+        const panelMaxH = Math.max(300, Math.round(vp.height - (minHudTop - vp.top) - 20));
+        panel.style.width = '';
+        panel.style.maxHeight = `${panelMaxH}px`;
+        const pSize = measureElSize(panel, 326, Math.min(540, panelMaxH));
+        const pH = Math.min(panelMaxH, pSize.h);
+        const pLeft = fabBox.left;
+        const openBelow = fabBox.top < vp.top + vp.height * 0.45 && (visBottom - fabBox.bottom - 12 >= Math.min(pH, 320));
+        const pTop = openBelow ? (fabBox.bottom + 10) : (fabBox.top - pH - 10);
+        placeFixedBox(panel, pLeft, pTop, pSize.w, pH, 'bottom', vp, minHudTop);
+      }
+    }
+
+    if (floatProg) {
+      if (isMobile) {
+        const progW = Math.max(200, Math.min(320, Math.round(vp.width - 24)));
+        floatProg.style.width = `${progW}px`;
+        const progH = measureElSize(floatProg, progW, 44).h;
+        const progLeft = vp.left + Math.round((vp.width - progW) / 2);
+        const progTop = Math.min(fabBox.top - progH - 10, visBottom - sendFormH - 64 - progH);
+        placeFixedBox(floatProg, progLeft, progTop, progW, progH, 'bottom', vp, minHudTop);
+      } else {
+        floatProg.style.width = '';
+        const progSize = measureElSize(floatProg, 248, 44);
+        const progLeft = fabBox.left;
+        const progTop = fabBox.top - progSize.h - 10;
+        placeFixedBox(floatProg, progLeft, progTop, progSize.w, progSize.h, 'bottom', vp, minHudTop);
+      }
+    }
+  }
+
+  function scheduleResponsiveLayout() {
+    if (layoutRafId !== null) return;
+    const run = () => {
+      layoutRafId = null;
+      layoutResponsiveHud();
+    };
+    if (typeof window.requestAnimationFrame === 'function') {
+      layoutRafId = window.requestAnimationFrame(run);
+    } else {
+      layoutRafId = setTimeout(run, 16);
+    }
+  }
+
+  function bindResponsiveListeners() {
+    if (responsiveListenersBound) return;
+    responsiveListenersBound = true;
+    try {
+      window.addEventListener?.('resize', scheduleResponsiveLayout);
+      window.addEventListener?.('orientationchange', () => setTimeout(layoutResponsiveHud, 120));
+      window.visualViewport?.addEventListener?.('resize', scheduleResponsiveLayout);
+      window.visualViewport?.addEventListener?.('scroll', scheduleResponsiveLayout);
+      const sheldEl = document.getElementById?.('sheld');
+      if (sheldEl && typeof ResizeObserver === 'function') {
+        const ro = new ResizeObserver(scheduleResponsiveLayout);
+        ro.observe(sheldEl);
+      }
+    } catch {}
+  }
+
   function attachFixedDrag(handleEl, targetEl, opts = {}) {
     if (!handleEl || !targetEl) return;
     const anchorY = opts.anchorY === 'top' ? 'top' : 'bottom';
@@ -1765,20 +1983,36 @@
     let moved = false;
     let startX = 0;
     let startY = 0;
-    let origRight = 16;
-    let origY = 76;
+    let origLeft = 0;
+    let origTop = 0;
+    let dragW = minW;
+    let dragH = minH;
+    let lastPlaced = null;
 
     handleEl.addEventListener('pointerdown', (e) => {
       if (opts.ignoreSelector && e.target?.closest?.(opts.ignoreSelector)) return;
       dragging = true;
       moved = false;
+      lastPlaced = null;
       startX = e.clientX;
       startY = e.clientY;
+      const vp = getViewportBox();
       const rect = targetEl.getBoundingClientRect?.();
-      const vw = window.innerWidth || 1280;
-      const vh = window.innerHeight || 800;
-      origRight = rect ? vw - rect.right : 16;
-      origY = rect ? (anchorY === 'top' ? rect.top : vh - rect.bottom) : 76;
+      dragW = (rect && rect.width > 20) ? rect.width : minW;
+      dragH = (rect && rect.height > 20) ? rect.height : minH;
+      const parsedRight = parseFloat(targetEl.style.right);
+      const parsedTop = parseFloat(targetEl.style.top);
+      const parsedBottom = parseFloat(targetEl.style.bottom);
+      origLeft = Number.isFinite(parsedRight)
+        ? (vp.layoutW - parsedRight - dragW)
+        : (rect ? rect.left : (vp.left + vp.width - dragW - 14));
+      if (anchorY === 'top') {
+        origTop = Number.isFinite(parsedTop) ? parsedTop : (rect ? rect.top : (vp.top + 64));
+      } else {
+        origTop = Number.isFinite(parsedBottom)
+          ? (vp.layoutH - parsedBottom - dragH)
+          : (rect ? rect.top : (vp.top + vp.height - dragH - 76));
+      }
       handleEl.setPointerCapture?.(e.pointerId);
     });
     handleEl.addEventListener('pointermove', (e) => {
@@ -1787,22 +2021,26 @@
       const dy = e.clientY - startY;
       if (Math.abs(dx) > 5 || Math.abs(dy) > 5) moved = true;
       if (!moved) return;
-      const vw = window.innerWidth || 1280;
-      const vh = window.innerHeight || 800;
-      const nextRight = Math.max(8, Math.min(vw - minW, origRight - dx));
-      const nextY = Math.max(8, Math.min(vh - minH, anchorY === 'top' ? origY + dy : origY - dy));
-      targetEl.style.right = `${nextRight}px`;
-      targetEl.style[anchorY] = `${nextY}px`;
+      const vp = getViewportBox();
+      lastPlaced = placeFixedBox(targetEl, origLeft + dx, origTop + dy, dragW, dragH, anchorY, vp);
     });
     handleEl.addEventListener('pointerup', (e) => {
       if (!dragging) return;
       dragging = false;
       handleEl.releasePointerCapture?.(e.pointerId);
       if (moved) {
+        const vp = getViewportBox();
+        const placed = lastPlaced || { left: origLeft, top: origTop, w: dragW, h: dragH };
+        const rightOff = Math.max(6, Math.round((vp.left + vp.width) - (placed.left + placed.w)));
+        const yOff = anchorY === 'top'
+          ? Math.max(6, Math.round(placed.top - vp.top))
+          : Math.max(6, Math.round((vp.top + vp.height) - (placed.top + placed.h)));
         opts.onSavePos?.({
-          right: parseInt(targetEl.style.right, 10) || 16,
-          [anchorY]: parseInt(targetEl.style[anchorY], 10) || (anchorY === 'top' ? 64 : 76),
+          right: rightOff,
+          [anchorY]: yOff,
+          isMobile: vp.width <= 768,
         });
+        layoutResponsiveHud();
       } else {
         opts.onClick?.(e);
       }
@@ -1816,10 +2054,6 @@
     const fab = document.createElement('div');
     fab.id = 'yiyi-st-fab';
     fab.innerHTML = `<span class="yiyi-dot"></span><span>🎨</span><span class="yiyi-state-tag">自动:关</span><button type="button" class="yiyi-fab-mini" id="yiyi-fab-draw" title="立即为最新楼层生图">🖌️</button><button type="button" class="yiyi-fab-mini" id="yiyi-fab-gallery" title="打开/收起悬浮画框（同层卡专用）">🖼️<span class="yiyi-fab-badge" id="yiyi-fab-badge" style="display:none">0</span></button>`;
-    if (s.fabPos && typeof s.fabPos.right === 'number' && typeof s.fabPos.bottom === 'number') {
-      fab.style.right = `${s.fabPos.right}px`;
-      fab.style.bottom = `${s.fabPos.bottom}px`;
-    }
 
     const panel = document.createElement('div');
     panel.id = 'yiyi-st-panel';
@@ -1827,7 +2061,10 @@
     panel.innerHTML = `
       <div class="yiyi-panel-head">
         <div class="yiyi-panel-title"><span>🎨</span> 依依本地无限制生图</div>
-        <button class="yiyi-close-btn" id="yiyi-panel-close" title="收起">✕</button>
+        <div class="yiyi-panel-head-actions">
+          <button type="button" class="yiyi-close-btn" id="yiyi-panel-reset-pos" title="重置悬浮球与画框到默认响应式位置">⟲</button>
+          <button type="button" class="yiyi-close-btn" id="yiyi-panel-close" title="收起">✕</button>
+        </div>
       </div>
       <div class="yiyi-panel-body">
         <label class="yiyi-switch-row">
@@ -1974,10 +2211,6 @@
         </details>
       </div>
     `;
-    if (s.overlayPos && typeof s.overlayPos.right === 'number' && typeof s.overlayPos.top === 'number') {
-      viewer.style.right = `${s.overlayPos.right}px`;
-      viewer.style.top = `${s.overlayPos.top}px`;
-    }
 
     const lightbox = document.createElement('div');
     lightbox.id = 'yiyi-lightbox';
@@ -1992,11 +2225,13 @@
     attachFixedDrag(fab, fab, {
       anchorY: 'bottom',
       minW: 110,
-      minH: 48,
+      minH: 38,
       ignoreSelector: '.yiyi-fab-mini',
       onSavePos: (pos) => {
         const st = getSettings();
-        st.fabPos = pos;
+        const saved = { right: pos.right, bottom: pos.bottom };
+        if (pos.isMobile) st.fabPosMobile = saved;
+        else st.fabPosDesktop = saved;
         saveSettings();
       },
       onClick: () => {
@@ -2004,6 +2239,7 @@
         if (!panel.classList.contains('yiyi-hidden')) {
           syncPanelFromSettings();
           syncTopLayer(panel, true, true);
+          layoutResponsiveHud();
           resolveStudioUrl();
         } else {
           syncTopLayer(panel, false);
@@ -2014,11 +2250,13 @@
     attachFixedDrag(document.getElementById('yiyi-ov-head'), viewer, {
       anchorY: 'top',
       minW: 200,
-      minH: 48,
+      minH: 44,
       ignoreSelector: '.yiyi-ov-actions, button',
       onSavePos: (pos) => {
         const st = getSettings();
-        st.overlayPos = pos;
+        const saved = { right: pos.right, top: pos.top };
+        if (pos.isMobile) st.overlayPosMobile = saved;
+        else st.overlayPosDesktop = saved;
         saveSettings();
       },
     });
@@ -2044,6 +2282,21 @@
       closeBtn.onclick = () => {
         syncTopLayer(panel, false);
         panel.classList.add('yiyi-hidden');
+      };
+    }
+    const resetPosBtn = document.getElementById('yiyi-panel-reset-pos');
+    if (resetPosBtn) {
+      resetPosBtn.onclick = () => {
+        const st = getSettings();
+        st.fabPos = null;
+        st.fabPosDesktop = null;
+        st.fabPosMobile = null;
+        st.overlayPos = null;
+        st.overlayPosDesktop = null;
+        st.overlayPosMobile = null;
+        saveSettings();
+        layoutResponsiveHud();
+        toastInfo('已复位悬浮球与画框到默认响应式位置', 'info');
       };
     }
     const testBtn = document.getElementById('yiyi-btn-test');
@@ -2120,6 +2373,7 @@
         overlayCollapsed = !overlayCollapsed;
         viewer.classList.toggle('yiyi-ov-collapsed', overlayCollapsed);
         ovCollapse.textContent = overlayCollapsed ? '▢' : '—';
+        layoutResponsiveHud();
       };
     }
     if (ovClose) ovClose.onclick = hideOverlayViewer;
@@ -2170,6 +2424,9 @@
     syncPanelFromSettings();
     updateGalleryBadge();
     refreshUpdateUi();
+    layoutResponsiveHud();
+    bindResponsiveListeners();
+    setTimeout(layoutResponsiveHud, 120);
   }
 
   function syncPanelFromSettings() {
@@ -2241,6 +2498,7 @@
           renderOverlayViewer();
         }
         promoteHudAbovePopovers();
+        layoutResponsiveHud();
       }, 250);
     });
   }

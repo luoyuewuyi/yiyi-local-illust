@@ -138,6 +138,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(135deg, rgba(124, 58, 237, 0.2), rgba(219, 39, 119, 0.14));
 }
@@ -147,6 +148,13 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+.yiyi-panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
 }
 .yiyi-close-btn {
   background: transparent;
@@ -158,11 +166,20 @@
   cursor: pointer;
   display: grid;
   place-items: center;
+  padding: 0;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.yiyi-close-btn:hover {
+  border-color: rgba(167, 139, 250, 0.65);
+  background: rgba(167, 139, 250, 0.16);
+  color: #fff;
 }
 
 .yiyi-panel-body {
   padding: 10px 12px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -497,7 +514,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 18px;
+  padding: max(14px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(14px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
   box-sizing: border-box;
 }
 #yiyi-lightbox.yiyi-hidden {
@@ -505,17 +522,17 @@
 }
 #yiyi-lightbox img {
   max-width: 94vw;
-  max-height: 90vh;
+  max-height: 90dvh;
   object-fit: contain;
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.75);
 }
 .yiyi-lb-close {
   position: fixed;
-  top: 16px;
-  right: 16px;
-  width: 34px;
-  height: 34px;
+  top: max(14px, env(safe-area-inset-top));
+  right: max(14px, env(safe-area-inset-right));
+  width: 36px;
+  height: 36px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.25);
   background: rgba(15, 23, 42, 0.85);
@@ -524,4 +541,163 @@
   cursor: pointer;
   display: grid;
   place-items: center;
+}
+
+/* ==========================================================================
+   Responsive mobile & narrow/zoomed visualViewport adaptations
+   ========================================================================== */
+#yiyi-st-fab,
+#yiyi-st-panel,
+#yiyi-float-progress,
+#yiyi-overlay-viewer {
+  box-sizing: border-box;
+}
+
+#yiyi-st-fab.yiyi-mobile {
+  padding: 5px 8px 5px 9px;
+  gap: 5px;
+  font-size: 12px;
+}
+#yiyi-st-fab.yiyi-mobile .yiyi-fab-mini {
+  width: 28px;
+  height: 28px;
+  font-size: 13px;
+}
+#yiyi-st-fab.yiyi-mobile-narrow .yiyi-state-tag {
+  display: none;
+}
+
+#yiyi-st-panel.yiyi-mobile {
+  max-width: calc(100vw - 16px);
+  max-height: min(80dvh, calc(100dvh - var(--topBarBlockSize, 44px) - 16px));
+  border-radius: 16px;
+  font-size: 12.5px;
+}
+#yiyi-st-panel.yiyi-mobile .yiyi-panel-head {
+  padding: 11px 12px;
+}
+#yiyi-st-panel.yiyi-mobile .yiyi-panel-body {
+  padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+  gap: 10px;
+}
+#yiyi-st-panel.yiyi-mobile .yiyi-close-btn {
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+}
+#yiyi-st-panel.yiyi-mobile .yiyi-btn {
+  min-height: 34px;
+  padding: 7px 11px;
+  font-size: 12px;
+}
+#yiyi-st-panel.yiyi-mobile .yiyi-field input,
+#yiyi-st-panel.yiyi-mobile .yiyi-field select,
+#yiyi-st-panel.yiyi-mobile .yiyi-field textarea {
+  padding: 7px 9px;
+  font-size: 13px;
+}
+#yiyi-st-panel.yiyi-mobile-narrow .yiyi-grid-2 {
+  grid-template-columns: 1fr;
+}
+
+#yiyi-overlay-viewer.yiyi-mobile {
+  max-width: calc(100vw - 16px);
+  max-height: 82dvh;
+  display: flex;
+  flex-direction: column;
+}
+#yiyi-overlay-viewer.yiyi-mobile .yiyi-ov-img-wrap {
+  min-height: 110px;
+  max-height: 42dvh;
+}
+#yiyi-overlay-viewer.yiyi-mobile .yiyi-ov-img-wrap img {
+  max-height: 42dvh;
+}
+#yiyi-overlay-viewer.yiyi-mobile .yiyi-ov-icon-btn {
+  min-width: 28px;
+  height: 28px;
+  font-size: 12px;
+}
+#yiyi-overlay-viewer.yiyi-mobile .yiyi-ov-foot {
+  overflow-y: auto;
+}
+
+#yiyi-float-progress.yiyi-mobile {
+  max-width: calc(100vw - 24px);
+  padding: 7px 10px;
+  font-size: 11.5px;
+}
+
+@media (max-width: 768px) {
+  #yiyi-st-fab {
+    padding: 5px 8px 5px 9px;
+    gap: 5px;
+    font-size: 12px;
+  }
+  #yiyi-st-fab .yiyi-fab-mini {
+    width: 28px;
+    height: 28px;
+    font-size: 13px;
+  }
+  #yiyi-st-panel {
+    max-width: calc(100vw - 16px);
+    max-height: min(80dvh, calc(100dvh - var(--topBarBlockSize, 44px) - 16px));
+    border-radius: 16px;
+    font-size: 12.5px;
+  }
+  #yiyi-st-panel .yiyi-panel-head {
+    padding: 11px 12px;
+  }
+  #yiyi-st-panel .yiyi-panel-body {
+    padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+  #yiyi-st-panel .yiyi-close-btn {
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+  }
+  #yiyi-st-panel .yiyi-btn {
+    min-height: 34px;
+    padding: 7px 11px;
+    font-size: 12px;
+  }
+  #yiyi-st-panel .yiyi-field input,
+  #yiyi-st-panel .yiyi-field select,
+  #yiyi-st-panel .yiyi-field textarea {
+    padding: 7px 9px;
+    font-size: 13px;
+  }
+  #yiyi-overlay-viewer {
+    max-width: calc(100vw - 16px);
+    max-height: 82dvh;
+  }
+  #yiyi-overlay-viewer .yiyi-ov-img-wrap {
+    min-height: 110px;
+    max-height: 42dvh;
+  }
+  #yiyi-overlay-viewer .yiyi-ov-img-wrap img {
+    max-height: 42dvh;
+  }
+  #yiyi-overlay-viewer .yiyi-ov-icon-btn {
+    min-width: 28px;
+    height: 28px;
+    font-size: 12px;
+  }
+  #yiyi-float-progress {
+    max-width: calc(100vw - 24px);
+  }
+  .yiyi-lb-close {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+@media (max-width: 460px) {
+  #yiyi-st-fab .yiyi-state-tag {
+    display: none;
+  }
+  #yiyi-st-panel .yiyi-grid-2 {
+    grid-template-columns: 1fr;
+  }
 }
