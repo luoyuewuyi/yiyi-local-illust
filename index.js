@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.7.1';
+  const EXT_VERSION = '1.8.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -22,6 +22,7 @@
     ratingMode: 'unrestricted',
     promptMode: 'auto_or_tag',
     ratio: '832x1216',
+    faceDetailer: true,
     hiresFix: false,
     skipFirstMessage: true,
     silentOffline: true,
@@ -1626,10 +1627,21 @@
       const charName = mes.name || getActiveCharName();
       const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, s, mes.mes);
 
+      const WIN_SDXL_PRESETS = new Set(['plantmilk_fast', 'plantmilk_dmd2', 'chenkin05', 'illustrious_fast']);
+      const ENGINE_PARAMS = {
+        anima_turbo: { steps: 10, cfg: 1.0 },
+        plantmilk_fast: { steps: 8, cfg: 4.5 },
+        illustrious_fast: { steps: 8, cfg: 4.5 },
+        plantmilk_dmd2: { steps: 6, cfg: 1.2 },
+        chenkin05: { steps: 22, cfg: 5.5 },
+        illustrious: { steps: 22, cfg: 5.5 },
+        anima: { steps: 26, cfg: 4.5 },
+      };
       const selectedEngine = s.engine || 'anima_turbo';
       const reqEngine = (activeEndpointMode === 'local' || activeEndpointMode === 'remote')
-        ? (selectedEngine === 'anima_turbo' ? 'anima' : selectedEngine === 'illustrious_fast' ? 'illustrious' : selectedEngine)
+        ? (selectedEngine === 'anima_turbo' ? 'anima' : WIN_SDXL_PRESETS.has(selectedEngine) ? 'illustrious' : selectedEngine)
         : selectedEngine;
+      const engineParams = ENGINE_PARAMS[reqEngine] || { steps: 26, cfg: 4.5 };
 
       const startResp = await fetch(`${activeStudioUrl}/api/st/illustrate/start`, {
         method: 'POST',
@@ -1652,8 +1664,9 @@
           rating_mode: s.ratingMode || 'unrestricted',
           width: parseInt(wStr, 10) || 832,
           height: parseInt(hStr, 10) || 1216,
-          steps: reqEngine === 'illustrious' ? 24 : (reqEngine === 'anima_turbo' || reqEngine === 'illustrious_fast' ? 10 : 26),
-          cfg: reqEngine === 'anima_turbo' ? 1.0 : (reqEngine === 'illustrious' ? 5.5 : 4.5),
+          steps: engineParams.steps,
+          cfg: engineParams.cfg,
+          face_detailer: s.faceDetailer !== false,
           hires_fix: !!s.hiresFix,
           return_base64: true,
           image_format: 'webp',
@@ -2249,10 +2262,13 @@
           <div class="yiyi-field">
             <label>生图引擎</label>
             <select id="yiyi-opt-engine">
-              <option value="anima_turbo">Anima-Turbo v1.1 (极速精绘 · 首选)</option>
-              <option value="anima">Anima-Aesthetic v1.1 (旗舰精绘 · 画质最强)</option>
-              <option value="illustrious">WAI-Illustrious v17 原版精绘 (24步无加速)</option>
-              <option value="illustrious_fast">WAI-v17 极速版 (保留原10步)</option>
+              <option value="anima_turbo">Anima-Turbo v1.1 (最强剧情理解 · 约90s · 首选)</option>
+              <option value="plantmilk_fast">PlantMilk Walnut 极速精绘 (轻小说质感 · 约75s)</option>
+              <option value="plantmilk_dmd2">PlantMilk DMD2 柔光极速 (最快油画感 · 约65s)</option>
+              <option value="chenkin05">ChenkinNoob v0.5 旗舰精绘 (22步光影拉满 · 约147s)</option>
+              <option value="anima">Anima-Aesthetic v1.1 (自然语言重精绘 · 约5分)</option>
+              <option value="illustrious">WAI-Illustrious v17 原版精绘 (经典22步)</option>
+              <option value="illustrious_fast">WAI-v17 修复极速版 (8步不发糊)</option>
             </select>
           </div>
           <div class="yiyi-field">
@@ -2313,6 +2329,7 @@
             <option value="floor_only">仅挂载到酒馆楼层 (关闭悬浮画框)</option>
           </select>
         </div>
+        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-face-detailer" /> ✨ 自动修脸增强（FaceDetailer，五官眼睛更精致 · 仅增约20秒）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 开启 1.5x 高清重绘（耗时略增，细节更锐利）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 无可用生图服务时静默不弹窗</label>
@@ -2574,6 +2591,7 @@
     bindVal('yiyi-opt-style', 'stylePrefix');
     bindVal('yiyi-opt-memory-mode', 'memoryMode');
     bindVal('yiyi-opt-overlay-mode', 'overlayMode');
+    bindVal('yiyi-opt-face-detailer', 'faceDetailer', true);
     bindVal('yiyi-opt-hires', 'hiresFix', true);
     bindVal('yiyi-opt-skip-first', 'skipFirstMessage', true);
     bindVal('yiyi-opt-silent', 'silentOffline', true);
@@ -2608,6 +2626,7 @@
     setVal('yiyi-opt-style', s.stylePrefix);
     setVal('yiyi-opt-memory-mode', s.memoryMode || (s.autoWorldLore === false ? 'off' : 'smart'));
     setVal('yiyi-opt-overlay-mode', s.overlayMode || 'auto');
+    setVal('yiyi-opt-face-detailer', s.faceDetailer !== false, true);
     setVal('yiyi-opt-hires', s.hiresFix, true);
     setVal('yiyi-opt-skip-first', s.skipFirstMessage, true);
     setVal('yiyi-opt-silent', s.silentOffline, true);
