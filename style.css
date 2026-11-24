@@ -1,6 +1,6 @@
 /* CSS freshness marker: index.js compares this with EXT_VERSION and cache-busts a stale sheet. */
 :root {
-  --yiyi-css-ver: "1.8.0";
+  --yiyi-css-ver: "1.8.1";
 }
 
 /* v1.7.1: SillyTavern's `html { transform: translateZ(0) }` makes <html> the containing block of

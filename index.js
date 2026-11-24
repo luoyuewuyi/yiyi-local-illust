@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.8.0';
+  const EXT_VERSION = '1.8.1';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -1681,7 +1681,7 @@
       // Poll job state cleanly (tolerates up to 3 transient mobile/Cloudflare blips)
       let jobData = null;
       let transientErrors = 0;
-      const deadline = Date.now() + 420000;
+      const deadline = Date.now() + 720000;
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 900));
         let jr;
@@ -1734,7 +1734,7 @@
       }
 
       if (!jobData || jobData.status !== 'done') {
-        throw new Error('生成超时（超过 7 分钟未完成），请检查服务端状态');
+        throw new Error('生成超时（超过 12 分钟未完成），请检查服务端状态或切到更快的引擎');
       }
 
       const res = jobData.extra_result || {};
@@ -2266,7 +2266,7 @@
               <option value="plantmilk_fast">PlantMilk Walnut 极速精绘 (轻小说质感 · 约75s)</option>
               <option value="plantmilk_dmd2">PlantMilk DMD2 柔光极速 (最快油画感 · 约65s)</option>
               <option value="chenkin05">ChenkinNoob v0.5 旗舰精绘 (22步光影拉满 · 约147s)</option>
-              <option value="anima">Anima-Aesthetic v1.1 (自然语言重精绘 · 约5分)</option>
+              <option value="anima">Anima-Aesthetic v1.1 (自然语言重精绘 · 约5~6分，偏慢)</option>
               <option value="illustrious">WAI-Illustrious v17 原版精绘 (经典22步)</option>
               <option value="illustrious_fast">WAI-v17 修复极速版 (8步不发糊)</option>
             </select>
