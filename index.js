@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.9.1';
+  const EXT_VERSION = '1.9.2';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -926,7 +926,9 @@
       }
     }
     if (btnEl && !updateBusy) {
-      btnEl.textContent = hasUpdate ? '⬇️ 立即一键更新' : '🔄 一键更新';
+      btnEl.textContent = hasUpdate
+        ? `⬇️ 立即更新${newerVer ? ` (v${remoteLatestVersion})` : ''}`
+        : `🔄 检查更新 (v${EXT_VERSION})`;
       btnEl.disabled = false;
     }
   }
@@ -1187,9 +1189,14 @@
       banner.classList.remove('is-ready', 'is-booting', 'is-sleeping');
       if (activeEndpointMode === 'cloud') {
         banner.classList.add('is-ready');
-        titleEl.textContent = activeBusy ? '🎨 当前可以生图（正在排队绘制中）' : '🟢 当前可以生图 · 云端 L4 已就绪';
-        const idleNote = idleRemMin !== null ? ` · 无操作约 ${idleRemMin} 分钟后自动关停` : ` · 闲置 ${idleMin} 分钟自动关停`;
-        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 L4 在线'}${cuText}${idleNote}`;
+        const llmTag = info.colab_llm_ready ? ' + 27B去审查' : '';
+        titleEl.textContent = activeBusy
+          ? '🎨 当前可以生图（正在排队绘制中）'
+          : `🟢 当前可以生图 · L4${llmTag} 就绪`;
+        const modeNote = idleRemMin !== null
+          ? ` · 夜间临时唤醒（约 ${idleRemMin} 分钟无操作自动休眠）`
+          : ' · 08:00–02:00 全天常驻零等待';
+        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 L4 在线'}${cuText}${modeNote}`;
       } else if (activeEndpointMode === 'booting') {
         banner.classList.add('is-booting');
         titleEl.textContent = '⏳ 正在自动唤醒云端 L4（约 2.5 分钟）…';
@@ -1197,11 +1204,11 @@
       } else if (activeEndpointMode === 'sleeping') {
         banner.classList.add('is-sleeping');
         titleEl.textContent = autoWake
-          ? '⚡ 云端待命省电中 · 点画图自动唤醒 L4'
+          ? '🌙 夜间休眠省电中 · 点画图自动唤醒 L4'
           : '🌙 当前不可生图 · 云端休眠省电中';
         subEl.textContent = autoWake
-          ? `平时 0 计费${cuText}。直接点画图自动开机（约 2.5 分钟），连续 ${idleMin} 分钟不用自动关停`
-          : `闲置省电中${cuText}，可点下方「⚡ 立即唤醒 L4」手动开机`;
+          ? `08:00–02:00 全天常驻，02:00–08:00 休眠省电${cuText}。半夜想画直接点图自动唤醒（约 2.5 分钟）`
+          : `休眠省电中${cuText}，可点下方「⚡ 提前唤醒 L4」手动开机`;
       } else if (activeEndpointMode === 'auth_error') {
         titleEl.textContent = '🔒 需要输入访问密码';
         subEl.textContent = '请在下方「⚙️ 连接地址与密码设置」填写正确的访问密码';
@@ -2333,13 +2340,11 @@
       </div>
       <div class="yiyi-panel-body">
         <div class="yiyi-can-draw-banner" id="yiyi-can-draw-banner">
-          <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
-          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">默认常规 L4 按需自动唤醒 · 闲置 30 分钟自动关停省电</div>
-          <div class="yiyi-cloud-actions">
-            <button type="button" class="yiyi-btn" id="yiyi-btn-wake-cloud" style="display:none">⚡ 提前唤醒 L4</button>
-            <button type="button" class="yiyi-btn" id="yiyi-btn-test">🔄 刷新状态</button>
-            <button type="button" class="yiyi-btn" id="yiyi-btn-open-studio">🎨 独立远程生图页</button>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+            <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
+            <button type="button" class="yiyi-close-btn" id="yiyi-btn-test" title="刷新云端状态" style="flex-shrink:0">↻</button>
           </div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">08:00–02:00 全天常驻 L4 + 27B · 02:00–08:00 休眠省电</div>
         </div>
 
         <label class="yiyi-switch-row">
@@ -2347,25 +2352,30 @@
           <input type="checkbox" id="yiyi-opt-enabled" />
         </label>
 
-        <div class="yiyi-update-row" id="yiyi-update-row">
-          <span id="yiyi-ver-text">当前 v${EXT_VERSION}</span>
-          <button type="button" class="yiyi-btn" id="yiyi-btn-update">🔄 一键更新</button>
-        </div>
-
         <button class="yiyi-btn yiyi-btn-primary" id="yiyi-btn-draw-last">🖌️ 为最新楼层立即画一张</button>
-        <button class="yiyi-btn" id="yiyi-btn-gallery">🖼️ 打开本局插画画廊（同层卡专用）</button>
+
+        <div class="yiyi-field">
+          <label>云端旗舰工作流</label>
+          <select id="yiyi-opt-engine">
+            <option value="noctq_v1">👑 Noct-Q-Anime V1 (10/10 全能王者 · 首选)</option>
+            <option value="anima_noct">🌙 Anima-Noct V2 (9.9/10 多人零串色 · 夜景剧场)</option>
+            <option value="rouwei_vpred">🖌️ RouWei v0.8 V-Pred (9.9/10 厚涂光影封神)</option>
+            <option value="anima_artbook">🎨 Anima v1.1 Artbook (9.8/10 画集柔光)</option>
+            <option value="netayume">💎 NetaYume-Lumina v4 (9.7/10 极净锐利)</option>
+            <option value="janku_v777">⚡ JANKU v7.77 (9.6/10 极速二次元 SDXL)</option>
+            <option value="newbie">✨ NewBie-Exp0.1 XML (9.6/10 XML角色锁定)</option>
+          </select>
+        </div>
 
         <div class="yiyi-grid-2">
           <div class="yiyi-field">
-            <label>云端旗舰工作流</label>
-            <select id="yiyi-opt-engine">
-              <option value="noctq_v1">👑 Noct-Q-Anime V1 (10/10 全能王者 · 首选)</option>
-              <option value="anima_noct">🌙 Anima-Noct V2 (9.9/10 多人零串色 · 夜景剧场)</option>
-              <option value="rouwei_vpred">🖌️ RouWei v0.8 V-Pred (9.9/10 厚涂光影封神)</option>
-              <option value="anima_artbook">🎨 Anima v1.1 Artbook (9.8/10 画集柔光)</option>
-              <option value="netayume">💎 NetaYume-Lumina v4 (9.7/10 极净锐利)</option>
-              <option value="janku_v777">⚡ JANKU v7.77 (9.6/10 极速二次元 SDXL)</option>
-              <option value="newbie">✨ NewBie-Exp0.1 XML (9.6/10 XML角色锁定)</option>
+            <label>默认画幅</label>
+            <select id="yiyi-opt-ratio">
+              <option value="1024x1536">竖图 1024×1536</option>
+              <option value="1344x896">横图 1344×896</option>
+              <option value="1280x1280">方图 1280×1280</option>
+              <option value="832x1216">竖图 832×1216</option>
+              <option value="1216x832">横图 1216×832</option>
             </select>
           </div>
           <div class="yiyi-field">
@@ -2378,62 +2388,54 @@
               <option value="explicit">Explicit 全尺度</option>
             </select>
           </div>
-          <div class="yiyi-field">
-            <label>画面提炼方式</label>
-            <select id="yiyi-opt-prompt-mode">
-              <option value="auto_or_tag">智能(有[IMG]用标签/无则AI提炼)</option>
-              <option value="auto_local">强制 AI 提炼画面</option>
-              <option value="tag_only">仅识别楼层 [IMG:...] 标签</option>
-            </select>
-          </div>
-          <div class="yiyi-field">
-            <label>默认画幅</label>
-            <select id="yiyi-opt-ratio">
-              <option value="1024x1536">竖图 1024×1536 (剧场高清)</option>
-              <option value="1344x896">横图 1344×896 (宽屏 CG)</option>
-              <option value="1280x1280">方图 1280×1280 (高清方图)</option>
-              <option value="832x1216">竖图 832×1216 (SDXL 标准)</option>
-              <option value="1216x832">横图 1216×832 (SDXL 宽屏)</option>
-            </select>
-          </div>
         </div>
 
-        <div class="yiyi-field">
-          <label>全局画风偏好（可选，留空完全跟随剧情）</label>
-          <input type="text" id="yiyi-opt-style" placeholder="例如: anime coloring, rim lighting" />
+        <div class="yiyi-cloud-actions">
+          <button type="button" class="yiyi-btn" id="yiyi-btn-open-studio">🎨 独立远程生图页</button>
+          <button type="button" class="yiyi-btn" id="yiyi-btn-update">🔄 更新 (v${EXT_VERSION})</button>
         </div>
-
-        <div class="yiyi-field">
-          <label>剧情记忆与人物一致性来源</label>
-          <select id="yiyi-opt-memory-mode">
-            <option value="smart">智能全适配 (小白X/表格/数据库/世界书 + 剧情自总结)</option>
-            <option value="story_only">仅前文剧情自总结 (无任何记忆插件也适用)</option>
-            <option value="off">关闭记忆读取 (只看当前这一楼)</option>
-          </select>
-        </div>
-        <div class="yiyi-field">
-          <label>同层卡 / 伪同层适配展示</label>
-          <select id="yiyi-opt-overlay-mode">
-            <option value="auto">智能同层适配 (普通卡贴楼层，同层/伪同层自动弹悬浮画框)</option>
-            <option value="always">始终弹出悬浮画框 (同时保留楼层原图)</option>
-            <option value="floor_only">仅挂载到酒馆楼层 (关闭悬浮画框)</option>
-          </select>
-        </div>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-face-detailer" /> ✨ 自动修脸 + 眼神精绘（SAM + Anzhc 瞳孔高光）</label>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hand-detailer" /> 🖐️ 自动修手增强（手部精修，特写更稳）</label>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 💎 IllustrationJaNai 高清重绘（SDXL / Anima 细节拉满）</label>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 休眠时段静默不弹窗</label>
 
         <details class="yiyi-adv-details" id="yiyi-adv-details">
-          <summary>⚙️ 连接地址与访问密码设置</summary>
+          <summary>⚙️ 高级画面选项与连接密码</summary>
           <div style="display:flex;flex-direction:column;gap:7px">
             <div class="yiyi-field">
-              <label>云端网关地址（默认已内置，一般无需修改）</label>
+              <label>画面提炼方式</label>
+              <select id="yiyi-opt-prompt-mode">
+                <option value="auto_or_tag">智能(有[IMG]用标签/无则27B提炼)</option>
+                <option value="auto_local">强制云端 27B 提炼画面</option>
+                <option value="tag_only">仅识别楼层 [IMG:...] 标签</option>
+              </select>
+            </div>
+            <div class="yiyi-field">
+              <label>全局画风偏好（可选，留空跟随剧情）</label>
+              <input type="text" id="yiyi-opt-style" placeholder="例如: anime coloring, rim lighting" />
+            </div>
+            <div class="yiyi-field">
+              <label>剧情记忆与人物一致性</label>
+              <select id="yiyi-opt-memory-mode">
+                <option value="smart">智能全适配 (记忆插件/世界书 + 剧情自总结)</option>
+                <option value="story_only">仅前文剧情自总结</option>
+                <option value="off">关闭记忆读取 (只看当前楼层)</option>
+              </select>
+            </div>
+            <div class="yiyi-field">
+              <label>同层卡 / 伪同层展示方式</label>
+              <select id="yiyi-opt-overlay-mode">
+                <option value="auto">智能同层适配 (同层卡自动弹悬浮画框)</option>
+                <option value="always">始终弹出悬浮画框</option>
+                <option value="floor_only">仅挂载到楼层</option>
+              </select>
+            </div>
+            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-face-detailer" /> ✨ 自动修脸 + 眼神精绘</label>
+            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hand-detailer" /> 🖐️ 自动修手增强</label>
+            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 💎 IllustrationJaNai 高清重绘</label>
+            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
+            <div class="yiyi-field">
+              <label>云端网关地址（已内置）</label>
               <input type="text" id="yiyi-opt-mac-url" placeholder="https://draw.fzy.asia/yiyi-mac" />
             </div>
             <div class="yiyi-field">
-              <label>访问密码（与独立生图页一致）</label>
+              <label>访问密码</label>
               <input type="password" id="yiyi-opt-token" placeholder="请输入配置密码" />
             </div>
           </div>
