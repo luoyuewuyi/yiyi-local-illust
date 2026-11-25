@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.9.0';
+  const EXT_VERSION = '1.9.1';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -1109,14 +1109,14 @@
       const resp = await fetch(`${gwUrl}/api/colab/start`, {
         method: 'POST',
         headers: buildHeaders(s),
-        body: JSON.stringify({ gpu: 'auto', force: false }),
+        body: JSON.stringify({ gpu: 'L4', force: false }),
       });
       if (!resp.ok) {
         const body = await resp.text().catch(() => '');
-        throw new Error(formatHttpErr(resp.status, '临时唤醒云端', body));
+        throw new Error(formatHttpErr(resp.status, '唤醒云端 L4', body));
       }
       const data = await resp.json().catch(() => ({}));
-      toastInfo(data.message || '⚡ 已开始唤醒云端 GPU，约 1~2 分钟后即可生图~', 'info');
+      toastInfo(data.message || '⚡ 已开始唤醒云端 L4，约 2.5 分钟后就绪，30 分钟不用自动关停~', 'info');
       activeEndpointMode = 'booting';
       updateConnectionUi();
       if (wakePollTimer) clearInterval(wakePollTimer);
@@ -1127,8 +1127,8 @@
         if (r?.ok) {
           clearInterval(wakePollTimer);
           wakePollTimer = null;
-          toastInfo('🟢 云端 GPU 已就绪，现在可以开始生图啦！', 'success');
-        } else if (tries >= 36) {
+          toastInfo('🟢 云端 L4 已就绪，现在可以开始生图啦！', 'success');
+        } else if (tries >= 48) {
           clearInterval(wakePollTimer);
           wakePollTimer = null;
         }
@@ -1151,10 +1151,14 @@
     const advDetails = document.getElementById('yiyi-adv-details');
 
     const info = activeCloudInfo || {};
-    const schedule = info.schedule || '18:00–01:00 (北京时间)';
-    const gpuName = String(info.gpu_name || info.gpu_tier || '').replace(/^cuda:\d+\s*/i, '').trim();
+    const autoWake = info.auto_wake !== false;
+    const idleMin = info.idle_timeout_minutes || 30;
+    const idleRemMin = typeof info.idle_remaining_seconds === 'number'
+      ? Math.max(1, Math.ceil(info.idle_remaining_seconds / 60))
+      : null;
+    const gpuName = String(info.gpu_name || info.gpu_tier || 'L4').replace(/^cuda:\d+\s*/i, '').replace(/\s*:.*$/, '').trim();
     const cuText = typeof info.cu_balance === 'number'
-      ? ` · 余额 ${info.cu_balance.toFixed(0)} CU (月封顶 ${Math.round(info.monthly_cap || 2000)})`
+      ? ` · 余额 ${info.cu_balance.toFixed(0)} CU`
       : '';
 
     if (fab) {
@@ -1171,9 +1175,9 @@
       } else if (activeEndpointMode === 'cloud') {
         tag.textContent = s.enabled ? '可生图·自动' : '可生图';
       } else if (activeEndpointMode === 'booting') {
-        tag.textContent = '开机中…';
+        tag.textContent = '唤醒中…';
       } else if (activeEndpointMode === 'sleeping') {
-        tag.textContent = '休眠中';
+        tag.textContent = autoWake ? (s.enabled ? '待命·自动' : '待命') : '休眠中';
       } else {
         tag.textContent = s.enabled ? '自动:开' : '未连接';
       }
@@ -1183,16 +1187,21 @@
       banner.classList.remove('is-ready', 'is-booting', 'is-sleeping');
       if (activeEndpointMode === 'cloud') {
         banner.classList.add('is-ready');
-        titleEl.textContent = activeBusy ? '🎨 当前可以生图（正在排队绘制中）' : '🟢 当前可以生图 · 云端顶配已就绪';
-        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 GPU 在线'}${cuText} · 每晚 ${schedule}`;
+        titleEl.textContent = activeBusy ? '🎨 当前可以生图（正在排队绘制中）' : '🟢 当前可以生图 · 云端 L4 已就绪';
+        const idleNote = idleRemMin !== null ? ` · 无操作约 ${idleRemMin} 分钟后自动关停` : ` · 闲置 ${idleMin} 分钟自动关停`;
+        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 L4 在线'}${cuText}${idleNote}`;
       } else if (activeEndpointMode === 'booting') {
         banner.classList.add('is-booting');
-        titleEl.textContent = '⏳ 当前暂不可生图 · 云端开机部署中';
-        subEl.textContent = `正在启动云端显卡与模型（约 1~2 分钟自动就绪），请稍候…`;
+        titleEl.textContent = '⏳ 正在自动唤醒云端 L4（约 2.5 分钟）…';
+        subEl.textContent = info.phase || '正在拉起云端显卡与冠军模型，点画图也可直接排队等待就绪';
       } else if (activeEndpointMode === 'sleeping') {
         banner.classList.add('is-sleeping');
-        titleEl.textContent = '🌙 当前不可生图 · 云端休眠省电中';
-        subEl.textContent = `每晚 ${schedule} 自动开启${cuText}。白天急用可点下方「⚡ 临时唤醒云端」`;
+        titleEl.textContent = autoWake
+          ? '⚡ 云端待命省电中 · 点画图自动唤醒 L4'
+          : '🌙 当前不可生图 · 云端休眠省电中';
+        subEl.textContent = autoWake
+          ? `平时 0 计费${cuText}。直接点画图自动开机（约 2.5 分钟），连续 ${idleMin} 分钟不用自动关停`
+          : `闲置省电中${cuText}，可点下方「⚡ 立即唤醒 L4」手动开机`;
       } else if (activeEndpointMode === 'auth_error') {
         titleEl.textContent = '🔒 需要输入访问密码';
         subEl.textContent = '请在下方「⚙️ 连接地址与密码设置」填写正确的访问密码';
@@ -1213,11 +1222,11 @@
       if (activeEndpointMode === 'sleeping') {
         wakeBtn.style.display = '';
         wakeBtn.disabled = false;
-        wakeBtn.textContent = '⚡ 临时唤醒云端';
+        wakeBtn.textContent = '⚡ 提前唤醒 L4';
       } else if (activeEndpointMode === 'booting') {
         wakeBtn.style.display = '';
         wakeBtn.disabled = true;
-        wakeBtn.textContent = '⏳ 云端开机中…';
+        wakeBtn.textContent = '⏳ L4 唤醒中…';
       } else {
         wakeBtn.style.display = 'none';
       }
@@ -1680,27 +1689,30 @@
     runningFloorIds.add(idNum);
     try {
       const conn = await resolveStudioUrl();
-      if (!conn?.ok) {
+      const canAutoWake = !conn?.ok && (conn?.reason === 'sleeping' || conn?.reason === 'booting') && !!activeGatewayUrl && conn?.data?.auto_wake !== false;
+      const targetUrl = conn?.ok ? activeStudioUrl : (canAutoWake ? activeGatewayUrl : null);
+
+      if (!targetUrl) {
         const showErr = isManual || conn?.reason === 'auth_error' || conn?.reason === 'mixed_content' || !s.silentOffline;
         if (showErr) {
-          if (conn?.reason === 'sleeping') {
-            toastInfo('🌙 当前不可生图：云端休眠中（每晚 18:00–01:00 自动开启），点开悬浮窗可「⚡ 临时唤醒云端」', 'warning');
-          } else if (conn?.reason === 'booting') {
-            toastInfo('⏳ 云端 GPU 正在开机部署中，请稍等约 1 分钟即可生图', 'info');
-          } else {
-            const target = conn?.url ? ` [${conn.url}]` : '';
-            toastInfo(
-              `${conn?.detail || '暂未连上云端生图服务，请检查网络与服务状态'}${target}`,
-              conn?.reason === 'auth_error' ? 'error' : 'warning',
-            );
-          }
+          const target = conn?.url ? ` [${conn.url}]` : '';
+          toastInfo(
+            `${conn?.detail || '暂未连上云端生图服务，请检查网络与服务状态'}${target}`,
+            conn?.reason === 'auth_error' ? 'error' : 'warning',
+          );
         }
         return;
       }
 
       const showFloat = s.overlayMode === 'always' || !mesEl || isSameFloorOverlayActive(mesEl);
-      if (mesEl) setFloorStatus(mesEl, '正在提取记忆与剧情画面特征…', 8);
-      setGlobalProgress('正在提取记忆与剧情画面特征…', 8, showFloat);
+      const initMsg = canAutoWake
+        ? '⚡ 云端休眠中，正在自动唤醒 L4（约 2.5 分钟）后为您绘制…'
+        : '正在提取记忆与剧情画面特征…';
+      if (mesEl) setFloorStatus(mesEl, initMsg, 8);
+      setGlobalProgress(initMsg, 8, showFloat);
+      if (canAutoWake && isManual) {
+        toastInfo('⚡ 正在自动唤醒云端 L4（约 2.5 分钟），就绪后自动出图，30 分钟不用自动关停~', 'info');
+      }
 
       const recentLines = [];
       for (let i = Math.max(0, idNum - 3); i < idNum; i++) {
@@ -1721,7 +1733,7 @@
 
       const reqEngine = VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'noctq_v1';
 
-      const startResp = await fetch(`${activeStudioUrl}/api/st/illustrate/start`, {
+      const startResp = await fetch(`${targetUrl}/api/st/illustrate/start`, {
         method: 'POST',
         headers: buildHeaders(s),
         body: JSON.stringify({
@@ -1757,15 +1769,15 @@
       }
       const { job_id } = await startResp.json();
 
-      // Poll job state cleanly (tolerates up to 3 transient mobile/Cloudflare blips)
+      // Poll job state cleanly (tolerates up to 4 transient mobile/Cloudflare blips & 15 min total for auto-wake)
       let jobData = null;
       let transientErrors = 0;
-      const deadline = Date.now() + 720000;
+      const deadline = Date.now() + 900000;
       while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 900));
+        await new Promise((r) => setTimeout(r, 1100));
         let jr;
         try {
-          jr = await fetch(`${activeStudioUrl}/api/jobs/${job_id}`, {
+          jr = await fetch(`${targetUrl}/api/jobs/${job_id}`, {
             method: 'GET',
             headers: buildHeaders(s),
           });
@@ -2321,10 +2333,10 @@
       </div>
       <div class="yiyi-panel-body">
         <div class="yiyi-can-draw-banner" id="yiyi-can-draw-banner">
-          <div id="yiyi-can-draw-title" style="font-weight:700">正在检查当前是否可以生图…</div>
-          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">每晚 18:00–01:00 (北京时间) 自动开启云端显卡</div>
+          <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">默认常规 L4 按需自动唤醒 · 闲置 30 分钟自动关停省电</div>
           <div class="yiyi-cloud-actions">
-            <button type="button" class="yiyi-btn" id="yiyi-btn-wake-cloud" style="display:none">⚡ 临时唤醒云端</button>
+            <button type="button" class="yiyi-btn" id="yiyi-btn-wake-cloud" style="display:none">⚡ 提前唤醒 L4</button>
             <button type="button" class="yiyi-btn" id="yiyi-btn-test">🔄 刷新状态</button>
             <button type="button" class="yiyi-btn" id="yiyi-btn-open-studio">🎨 独立远程生图页</button>
           </div>
@@ -2578,12 +2590,15 @@
 
         const res = await resolveStudioUrl();
         if (res?.ok) {
-          const gpu = String(res.data?.gpu_name || res.data?.gpu_tier || '云端显卡').replace(/^cuda:\d+\s*/i, '').trim();
-          toastInfo(`🟢 当前可以生图！（${gpu} 已就绪）`, 'success');
+          const gpu = String(res.data?.gpu_name || res.data?.gpu_tier || 'L4').replace(/^cuda:\d+\s*/i, '').replace(/\s*:.*$/, '').trim();
+          const rem = typeof res.data?.idle_remaining_seconds === 'number'
+            ? `，无操作约 ${Math.max(1, Math.ceil(res.data.idle_remaining_seconds / 60))} 分钟后自动休眠`
+            : '';
+          toastInfo(`🟢 当前可以生图！（${gpu} 已就绪${rem}）`, 'success');
         } else if (res?.reason === 'sleeping') {
-          toastInfo('🌙 当前不可生图：云端休眠中（每晚 18:00–01:00 自动开启），点「⚡ 临时唤醒云端」可随时开机', 'info');
+          toastInfo('⚡ 云端待命省电中（0 计费）：直接点画图就会自动唤醒 L4（约 2.5 分钟），30 分钟不用自动关停！', 'info');
         } else if (res?.reason === 'booting') {
-          toastInfo('⏳ 云端正在开机部署中，请稍候 1~2 分钟', 'info');
+          toastInfo('⏳ 云端 L4 正在自动唤醒中，直接点画图也可排队等待就绪~', 'info');
         } else {
           const target = res?.url ? ` [${res.url}]` : '';
           toastInfo(
