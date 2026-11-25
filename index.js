@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.8.1';
+  const EXT_VERSION = '1.9.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -11,19 +11,30 @@
     DEFAULT_MAC_HTTP_URL,
   ]);
 
+  const VALID_CLOUD_ENGINES = new Set([
+    'noctq_v1',
+    'anima_noct',
+    'rouwei_vpred',
+    'anima_artbook',
+    'netayume',
+    'janku_v777',
+    'newbie',
+  ]);
+
   const DEFAULTS = {
     enabled: false,
-    backendPolicy: 'mac', // 'mac' | 'auto' | 'windows'
-    localUrl: 'http://127.0.0.1:7860',
+    backendPolicy: 'mac', // Always cloud gateway
+    localUrl: '',
     remoteUrl: '',
     macUrl: DEFAULT_MAC_HTTPS_URL,
     token: '',
-    engine: 'anima_turbo',
+    engine: 'noctq_v1',
     ratingMode: 'unrestricted',
     promptMode: 'auto_or_tag',
-    ratio: '832x1216',
+    ratio: '1024x1536',
     faceDetailer: true,
-    hiresFix: false,
+    handDetailer: true,
+    hiresFix: true,
     skipFirstMessage: true,
     silentOffline: true,
     autoWorldLore: true,
@@ -39,7 +50,9 @@
   };
 
   let activeStudioUrl = null;
-  let activeEndpointMode = 'offline'; // 'local' | 'remote' | 'mac' | 'auth_error' | ... | 'offline'
+  let activeGatewayUrl = null;
+  let activeCloudInfo = null;
+  let activeEndpointMode = 'offline'; // 'cloud' | 'sleeping' | 'booting' | 'auth_error' | ... | 'offline'
   let activeBusy = false;
   let lastConnError = null;
   let activeProgressLabel = '';
@@ -72,9 +85,16 @@
     }
     const raw = ctx.extensionSettings[EXT_KEY] || {};
     const merged = Object.assign({}, DEFAULTS, raw);
+    merged.backendPolicy = 'mac';
     const rawMac = typeof raw.macUrl === 'string' ? raw.macUrl.trim().replace(/\/+$/, '') : '';
     if (!rawMac || rawMac === '/yiyi-mac') {
       merged.macUrl = DEFAULT_MAC_HTTPS_URL;
+    }
+    if (!VALID_CLOUD_ENGINES.has(merged.engine)) {
+      merged.engine = 'noctq_v1';
+    }
+    if (raw.handDetailer === undefined) {
+      merged.handDetailer = true;
     }
     if (raw.memoryMode == null && raw.autoWorldLore === false) {
       merged.memoryMode = 'off';
@@ -821,12 +841,16 @@
         };
       }
       if (data.online === false) {
+        const isBooting = !!(data.op_running || data.state === 'booting');
         return {
           ok: false,
           status: resp.status,
-          reason: 'comfy_offline',
+          reason: isBooting ? 'booting' : 'sleeping',
           url,
-          detail: '桥接服务在线，但后端渲染引擎（ComfyUI）离线',
+          data,
+          detail: data.phase || (isBooting
+            ? '云端 GPU 正在开机部署中（约 1~2 分钟），请稍候…'
+            : '当前不可生图：云端 GPU 休眠中（每晚 18:00–01:00 自动开启）'),
         };
       }
       return { ok: true, status: resp.status, url, data };
@@ -1020,6 +1044,8 @@
 
   function _markEndpointOnline(mode, res) {
     activeStudioUrl = res.url;
+    activeGatewayUrl = res.url;
+    activeCloudInfo = res.data || null;
     activeEndpointMode = mode;
     activeBusy = !!res.data?.busy;
     lastConnError = null;
@@ -1033,60 +1059,84 @@
 
   async function resolveStudioUrl() {
     const s = getSettings();
-    const policy = s.backendPolicy || 'mac';
-    let winErr = null;
-    let macErr = null;
+    let gwErr = null;
+    const candidates = getMacProbeCandidates(s.macUrl);
 
-    if (policy !== 'mac') {
-      const localUrl = String(s.localUrl || '').trim();
-      if (localUrl) {
-        const localRes = await pingEndpoint(localUrl, s.token, 1200);
-        if (localRes?.ok) return _markEndpointOnline('local', localRes);
-        winErr = localRes;
-      }
-      const remoteUrl = String(s.remoteUrl || '').trim();
-      if (remoteUrl) {
-        const remoteRes = await pingEndpoint(remoteUrl, s.token, 4000);
-        if (remoteRes?.ok) return _markEndpointOnline('remote', remoteRes);
-        winErr = remoteRes;
-      }
-      if (!localUrl && !remoteUrl) {
-        winErr = { ok: false, reason: 'empty_url', url: '', detail: '未填写 Windows 生图地址' };
-      }
-      if (policy === 'windows') {
-        activeStudioUrl = null;
-        lastConnError = winErr;
-        activeEndpointMode = winErr?.reason || 'offline';
-        activeBusy = false;
-        updateConnectionUi();
-        return winErr;
+    for (const cand of candidates) {
+      const res = await pingEndpoint(cand.url, s.token, cand.timeout);
+      if (res?.ok) return _markEndpointOnline('cloud', res);
+      gwErr = res;
+      if (res?.reason === 'auth_error' || res?.reason === 'sleeping' || res?.reason === 'booting') {
+        break;
       }
     }
 
-    if (policy !== 'windows') {
-      const candidates = getMacProbeCandidates(s.macUrl);
-      for (const cand of candidates) {
-        const macRes = await pingEndpoint(cand.url, s.token, cand.timeout);
-        if (macRes?.ok) return _markEndpointOnline('mac', macRes);
-        macErr = macRes;
-        if (macRes?.reason === 'auth_error' || macRes?.reason === 'comfy_offline') {
-          break;
-        }
-      }
-    }
-
-    const bestErr =
-      (winErr?.reason === 'auth_error' ? winErr : null) ||
-      macErr ||
-      winErr ||
-      { ok: false, reason: 'network_error', url: '', detail: '暂未连上生图服务' };
-
+    const bestErr = gwErr || { ok: false, reason: 'network_error', url: '', detail: '暂未连上云端生图网关' };
     activeStudioUrl = null;
+    if (bestErr.reason === 'sleeping' || bestErr.reason === 'booting') {
+      activeGatewayUrl = bestErr.url || null;
+      activeCloudInfo = bestErr.data || null;
+      if (bestErr.data?.latest_ext_version) {
+        remoteLatestVersion = String(bestErr.data.latest_ext_version).trim();
+      }
+    } else {
+      activeGatewayUrl = null;
+      activeCloudInfo = null;
+    }
     lastConnError = bestErr;
     activeEndpointMode = bestErr.reason || 'offline';
     activeBusy = false;
     updateConnectionUi();
+    refreshUpdateUi();
     return bestErr;
+  }
+
+  let wakePollTimer = null;
+
+  async function wakeCloudFromPanel() {
+    const s = getSettings();
+    const gwUrl = activeGatewayUrl || normalizeStudioUrl(s.macUrl || DEFAULT_MAC_HTTPS_URL);
+    if (!gwUrl) {
+      toastInfo('请先在底部设置填写云端网关地址', 'warning');
+      return;
+    }
+    const wakeBtn = document.getElementById('yiyi-btn-wake-cloud');
+    if (wakeBtn) {
+      wakeBtn.disabled = true;
+      wakeBtn.textContent = '⏳ 正在发送开机指令…';
+    }
+    try {
+      const resp = await fetch(`${gwUrl}/api/colab/start`, {
+        method: 'POST',
+        headers: buildHeaders(s),
+        body: JSON.stringify({ gpu: 'auto', force: false }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        throw new Error(formatHttpErr(resp.status, '临时唤醒云端', body));
+      }
+      const data = await resp.json().catch(() => ({}));
+      toastInfo(data.message || '⚡ 已开始唤醒云端 GPU，约 1~2 分钟后即可生图~', 'info');
+      activeEndpointMode = 'booting';
+      updateConnectionUi();
+      if (wakePollTimer) clearInterval(wakePollTimer);
+      let tries = 0;
+      wakePollTimer = setInterval(async () => {
+        tries += 1;
+        const r = await resolveStudioUrl().catch(() => null);
+        if (r?.ok) {
+          clearInterval(wakePollTimer);
+          wakePollTimer = null;
+          toastInfo('🟢 云端 GPU 已就绪，现在可以开始生图啦！', 'success');
+        } else if (tries >= 36) {
+          clearInterval(wakePollTimer);
+          wakePollTimer = null;
+        }
+      }, 5000);
+    } catch (err) {
+      toastInfo(err?.message || '唤醒云端失败', 'error');
+      updateConnectionUi();
+    }
   }
 
   function updateConnectionUi() {
@@ -1094,53 +1144,89 @@
     const fab = document.getElementById('yiyi-st-fab');
     const dot = fab?.querySelector('.yiyi-dot');
     const tag = fab?.querySelector('.yiyi-state-tag');
-    const statusText = document.getElementById('yiyi-conn-status');
+    const banner = document.getElementById('yiyi-can-draw-banner');
+    const titleEl = document.getElementById('yiyi-can-draw-title');
+    const subEl = document.getElementById('yiyi-can-draw-sub');
+    const wakeBtn = document.getElementById('yiyi-btn-wake-cloud');
+    const advDetails = document.getElementById('yiyi-adv-details');
+
+    const info = activeCloudInfo || {};
+    const schedule = info.schedule || '18:00–01:00 (北京时间)';
+    const gpuName = String(info.gpu_name || info.gpu_tier || '').replace(/^cuda:\d+\s*/i, '').trim();
+    const cuText = typeof info.cu_balance === 'number'
+      ? ` · 余额 ${info.cu_balance.toFixed(0)} CU (月封顶 ${Math.round(info.monthly_cap || 2000)})`
+      : '';
 
     if (fab) {
       fab.classList.toggle('is-on', !!s.enabled);
     }
     if (dot) {
       dot.className = 'yiyi-dot';
-      if (activeBusy) dot.classList.add('busy');
+      if (activeBusy || activeEndpointMode === 'booting') dot.classList.add('busy');
       else if (activeStudioUrl) dot.classList.add('online');
     }
     if (tag) {
-      tag.textContent = activeProgressLabel || (s.enabled ? '自动:开' : '自动:关');
-    }
-    if (statusText) {
-      if (activeEndpointMode === 'local') {
-        statusText.textContent = `🟢 本机 4060 直连 (${activeStudioUrl})`;
-      } else if (activeEndpointMode === 'remote') {
-        statusText.textContent = `🟢 远程 4060 在线 (${activeStudioUrl})`;
-      } else if (activeEndpointMode === 'mac') {
-        statusText.textContent = `🟢 Mac 24h 极速在线 (${activeStudioUrl || s.macUrl || DEFAULT_MAC_HTTPS_URL})`;
-      } else if (activeEndpointMode === 'auth_error') {
-        statusText.textContent = '🔒 需要输入正确的配置密码';
-      } else if (activeEndpointMode === 'mixed_content') {
-        statusText.textContent = '⚠️ HTTPS 页面禁止直连 HTTP 地址';
-      } else if (activeEndpointMode === 'not_found_relative') {
-        statusText.textContent = '❓ 相对路径 404，请改填完整远程地址';
-      } else if (activeEndpointMode === 'not_found_remote') {
-        statusText.textContent = '❓ 接口 404（请检查 /yiyi-mac 路径）';
-      } else if (activeEndpointMode === 'bad_gateway') {
-        statusText.textContent = '⚠️ 网关通但生图服务未启动';
-      } else if (activeEndpointMode === 'not_bridge') {
-        statusText.textContent = '❓ 返回了非生图网页（请检查路径）';
-      } else if (activeEndpointMode === 'comfy_offline') {
-        statusText.textContent = '⚠️ 桥接在线但渲染引擎离线';
-      } else if (activeEndpointMode === 'timeout') {
-        statusText.textContent = '⏱️ 连接超时，请检查网络或服务端';
-      } else if (activeEndpointMode === 'empty_url') {
-        statusText.textContent = '⚪ 未填写生图服务地址';
+      if (activeProgressLabel) {
+        tag.textContent = activeProgressLabel;
+      } else if (activeEndpointMode === 'cloud') {
+        tag.textContent = s.enabled ? '可生图·自动' : '可生图';
+      } else if (activeEndpointMode === 'booting') {
+        tag.textContent = '开机中…';
+      } else if (activeEndpointMode === 'sleeping') {
+        tag.textContent = '休眠中';
       } else {
-        statusText.textContent = '⚪ 未连通（点「测试连接」查看详情）';
+        tag.textContent = s.enabled ? '自动:开' : '未连接';
+      }
+    }
+
+    if (banner && titleEl && subEl) {
+      banner.classList.remove('is-ready', 'is-booting', 'is-sleeping');
+      if (activeEndpointMode === 'cloud') {
+        banner.classList.add('is-ready');
+        titleEl.textContent = activeBusy ? '🎨 当前可以生图（正在排队绘制中）' : '🟢 当前可以生图 · 云端顶配已就绪';
+        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 GPU 在线'}${cuText} · 每晚 ${schedule}`;
+      } else if (activeEndpointMode === 'booting') {
+        banner.classList.add('is-booting');
+        titleEl.textContent = '⏳ 当前暂不可生图 · 云端开机部署中';
+        subEl.textContent = `正在启动云端显卡与模型（约 1~2 分钟自动就绪），请稍候…`;
+      } else if (activeEndpointMode === 'sleeping') {
+        banner.classList.add('is-sleeping');
+        titleEl.textContent = '🌙 当前不可生图 · 云端休眠省电中';
+        subEl.textContent = `每晚 ${schedule} 自动开启${cuText}。白天急用可点下方「⚡ 临时唤醒云端」`;
+      } else if (activeEndpointMode === 'auth_error') {
+        titleEl.textContent = '🔒 需要输入访问密码';
+        subEl.textContent = '请在下方「⚙️ 连接地址与密码设置」填写正确的访问密码';
+        if (advDetails) advDetails.open = true;
+      } else if (activeEndpointMode === 'mixed_content') {
+        titleEl.textContent = '⚠️ HTTPS 页面禁止直连 HTTP';
+        subEl.textContent = '请将地址改为 https://draw.fzy.asia/yiyi-mac';
+      } else if (activeEndpointMode === 'timeout') {
+        titleEl.textContent = '⏱️ 连接云端网关超时';
+        subEl.textContent = '请检查网络后点「🔄 刷新状态」重试';
+      } else {
+        titleEl.textContent = '⚪ 暂未连上云端生图网关';
+        subEl.textContent = lastConnError?.detail || '点「🔄 刷新状态」检查云端是否可以生图';
+      }
+    }
+
+    if (wakeBtn) {
+      if (activeEndpointMode === 'sleeping') {
+        wakeBtn.style.display = '';
+        wakeBtn.disabled = false;
+        wakeBtn.textContent = '⚡ 临时唤醒云端';
+      } else if (activeEndpointMode === 'booting') {
+        wakeBtn.style.display = '';
+        wakeBtn.disabled = true;
+        wakeBtn.textContent = '⏳ 云端开机中…';
+      } else {
+        wakeBtn.style.display = 'none';
       }
     }
   }
 
   function toastInfo(msg, kind = 'info') {
     if (window.toastr && typeof window.toastr[kind] === 'function') {
-      window.toastr[kind](msg, '依依本地生图');
+      window.toastr[kind](msg, '依依云端生图');
     } else {
       console.log(`[yiyi-st:${kind}]`, msg);
     }
@@ -1597,11 +1683,17 @@
       if (!conn?.ok) {
         const showErr = isManual || conn?.reason === 'auth_error' || conn?.reason === 'mixed_content' || !s.silentOffline;
         if (showErr) {
-          const target = conn?.url ? ` [${conn.url}]` : '';
-          toastInfo(
-            `${conn?.detail || '暂未连上生图服务，请检查网络与服务状态'}${target}`,
-            conn?.reason === 'auth_error' ? 'error' : 'warning',
-          );
+          if (conn?.reason === 'sleeping') {
+            toastInfo('🌙 当前不可生图：云端休眠中（每晚 18:00–01:00 自动开启），点开悬浮窗可「⚡ 临时唤醒云端」', 'warning');
+          } else if (conn?.reason === 'booting') {
+            toastInfo('⏳ 云端 GPU 正在开机部署中，请稍等约 1 分钟即可生图', 'info');
+          } else {
+            const target = conn?.url ? ` [${conn.url}]` : '';
+            toastInfo(
+              `${conn?.detail || '暂未连上云端生图服务，请检查网络与服务状态'}${target}`,
+              conn?.reason === 'auth_error' ? 'error' : 'warning',
+            );
+          }
         }
         return;
       }
@@ -1623,25 +1715,11 @@
 
       const cleanedFloor = cleanFloorForDistill(mes.mes, true) || mes.mes;
       const recentContext = recentLines.join('\n');
-      const [wStr, hStr] = (s.ratio || '832x1216').split('x');
+      const [wStr, hStr] = (s.ratio || '1024x1536').split('x');
       const charName = mes.name || getActiveCharName();
       const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, s, mes.mes);
 
-      const WIN_SDXL_PRESETS = new Set(['plantmilk_fast', 'plantmilk_dmd2', 'chenkin05', 'illustrious_fast']);
-      const ENGINE_PARAMS = {
-        anima_turbo: { steps: 10, cfg: 1.0 },
-        plantmilk_fast: { steps: 8, cfg: 4.5 },
-        illustrious_fast: { steps: 8, cfg: 4.5 },
-        plantmilk_dmd2: { steps: 6, cfg: 1.2 },
-        chenkin05: { steps: 22, cfg: 5.5 },
-        illustrious: { steps: 22, cfg: 5.5 },
-        anima: { steps: 26, cfg: 4.5 },
-      };
-      const selectedEngine = s.engine || 'anima_turbo';
-      const reqEngine = (activeEndpointMode === 'local' || activeEndpointMode === 'remote')
-        ? (selectedEngine === 'anima_turbo' ? 'anima' : WIN_SDXL_PRESETS.has(selectedEngine) ? 'illustrious' : selectedEngine)
-        : selectedEngine;
-      const engineParams = ENGINE_PARAMS[reqEngine] || { steps: 26, cfg: 4.5 };
+      const reqEngine = VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'noctq_v1';
 
       const startResp = await fetch(`${activeStudioUrl}/api/st/illustrate/start`, {
         method: 'POST',
@@ -1662,11 +1740,12 @@
           prompt_mode: s.promptMode || 'auto_or_tag',
           engine: reqEngine,
           rating_mode: s.ratingMode || 'unrestricted',
-          width: parseInt(wStr, 10) || 832,
-          height: parseInt(hStr, 10) || 1216,
-          steps: engineParams.steps,
-          cfg: engineParams.cfg,
+          width: parseInt(wStr, 10) || 1024,
+          height: parseInt(hStr, 10) || 1536,
+          steps: 0,
+          cfg: 0,
           face_detailer: s.faceDetailer !== false,
+          hand_detailer: s.handDetailer !== false,
           hires_fix: !!s.hiresFix,
           return_base64: true,
           image_format: 'webp',
@@ -1778,7 +1857,7 @@
 
     const btn = document.createElement('div');
     btn.className = 'mes_button yiyi-floor-btn fa-solid fa-palette';
-    btn.title = '依依本地生图：为这一层生成插画';
+    btn.title = '依依云端生图：为这一层生成插画';
     btn.onclick = (e) => {
       e.stopPropagation();
       illustrateFloor(idNum, true);
@@ -2234,22 +2313,28 @@
     panel.className = 'yiyi-hidden';
     panel.innerHTML = `
       <div class="yiyi-panel-head">
-        <div class="yiyi-panel-title"><span>🎨</span> 依依本地无限制生图</div>
+        <div class="yiyi-panel-title"><span>🎨</span> 依依云端无限制生图</div>
         <div class="yiyi-panel-head-actions">
           <button type="button" class="yiyi-close-btn" id="yiyi-panel-reset-pos" title="重置悬浮球与画框到默认响应式位置">⟲</button>
           <button type="button" class="yiyi-close-btn" id="yiyi-panel-close" title="收起">✕</button>
         </div>
       </div>
       <div class="yiyi-panel-body">
+        <div class="yiyi-can-draw-banner" id="yiyi-can-draw-banner">
+          <div id="yiyi-can-draw-title" style="font-weight:700">正在检查当前是否可以生图…</div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">每晚 18:00–01:00 (北京时间) 自动开启云端显卡</div>
+          <div class="yiyi-cloud-actions">
+            <button type="button" class="yiyi-btn" id="yiyi-btn-wake-cloud" style="display:none">⚡ 临时唤醒云端</button>
+            <button type="button" class="yiyi-btn" id="yiyi-btn-test">🔄 刷新状态</button>
+            <button type="button" class="yiyi-btn" id="yiyi-btn-open-studio">🎨 独立远程生图页</button>
+          </div>
+        </div>
+
         <label class="yiyi-switch-row">
           <strong>楼层生成自动插画</strong>
           <input type="checkbox" id="yiyi-opt-enabled" />
         </label>
 
-        <div class="yiyi-status-row">
-          <span id="yiyi-conn-status">检查连接中…</span>
-          <button class="yiyi-btn" id="yiyi-btn-test">测试连接</button>
-        </div>
         <div class="yiyi-update-row" id="yiyi-update-row">
           <span id="yiyi-ver-text">当前 v${EXT_VERSION}</span>
           <button type="button" class="yiyi-btn" id="yiyi-btn-update">🔄 一键更新</button>
@@ -2260,15 +2345,15 @@
 
         <div class="yiyi-grid-2">
           <div class="yiyi-field">
-            <label>生图引擎</label>
+            <label>云端旗舰工作流</label>
             <select id="yiyi-opt-engine">
-              <option value="anima_turbo">Anima-Turbo v1.1 (最强剧情理解 · 约90s · 首选)</option>
-              <option value="plantmilk_fast">PlantMilk Walnut 极速精绘 (轻小说质感 · 约75s)</option>
-              <option value="plantmilk_dmd2">PlantMilk DMD2 柔光极速 (最快油画感 · 约65s)</option>
-              <option value="chenkin05">ChenkinNoob v0.5 旗舰精绘 (22步光影拉满 · 约147s)</option>
-              <option value="anima">Anima-Aesthetic v1.1 (自然语言重精绘 · 约5~6分，偏慢)</option>
-              <option value="illustrious">WAI-Illustrious v17 原版精绘 (经典22步)</option>
-              <option value="illustrious_fast">WAI-v17 修复极速版 (8步不发糊)</option>
+              <option value="noctq_v1">👑 Noct-Q-Anime V1 (10/10 全能王者 · 首选)</option>
+              <option value="anima_noct">🌙 Anima-Noct V2 (9.9/10 多人零串色 · 夜景剧场)</option>
+              <option value="rouwei_vpred">🖌️ RouWei v0.8 V-Pred (9.9/10 厚涂光影封神)</option>
+              <option value="anima_artbook">🎨 Anima v1.1 Artbook (9.8/10 画集柔光)</option>
+              <option value="netayume">💎 NetaYume-Lumina v4 (9.7/10 极净锐利)</option>
+              <option value="janku_v777">⚡ JANKU v7.77 (9.6/10 极速二次元 SDXL)</option>
+              <option value="newbie">✨ NewBie-Exp0.1 XML (9.6/10 XML角色锁定)</option>
             </select>
           </div>
           <div class="yiyi-field">
@@ -2285,27 +2370,20 @@
             <label>画面提炼方式</label>
             <select id="yiyi-opt-prompt-mode">
               <option value="auto_or_tag">智能(有[IMG]用标签/无则AI提炼)</option>
-              <option value="auto_local">强制本机 AI 提炼画面</option>
+              <option value="auto_local">强制 AI 提炼画面</option>
               <option value="tag_only">仅识别楼层 [IMG:...] 标签</option>
             </select>
           </div>
           <div class="yiyi-field">
             <label>默认画幅</label>
             <select id="yiyi-opt-ratio">
-              <option value="832x1216">竖图 832×1216</option>
-              <option value="1216x832">横图 1216×832</option>
-              <option value="1024x1024">方图 1024×1024</option>
+              <option value="1024x1536">竖图 1024×1536 (剧场高清)</option>
+              <option value="1344x896">横图 1344×896 (宽屏 CG)</option>
+              <option value="1280x1280">方图 1280×1280 (高清方图)</option>
+              <option value="832x1216">竖图 832×1216 (SDXL 标准)</option>
+              <option value="1216x832">横图 1216×832 (SDXL 宽屏)</option>
             </select>
           </div>
-        </div>
-
-        <div class="yiyi-field">
-          <label>生图算力路由</label>
-          <select id="yiyi-opt-policy">
-            <option value="mac">Mac 24h 极速常驻 (推荐)</option>
-            <option value="auto">自动优选 (Windows 4060优先 → Mac 24h兜底)</option>
-            <option value="windows">仅走 Windows 4060</option>
-          </select>
         </div>
 
         <div class="yiyi-field">
@@ -2329,28 +2407,25 @@
             <option value="floor_only">仅挂载到酒馆楼层 (关闭悬浮画框)</option>
           </select>
         </div>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-face-detailer" /> ✨ 自动修脸增强（FaceDetailer，五官眼睛更精致 · 仅增约20秒）</label>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 开启 1.5x 高清重绘（耗时略增，细节更锐利）</label>
+        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-face-detailer" /> ✨ 自动修脸 + 眼神精绘（SAM + Anzhc 瞳孔高光）</label>
+        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hand-detailer" /> 🖐️ 自动修手增强（手部精修，特写更稳）</label>
+        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 💎 IllustrationJaNai 高清重绘（SDXL / Anima 细节拉满）</label>
         <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
-        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 无可用生图服务时静默不弹窗</label>
+        <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-silent" /> 休眠时段静默不弹窗</label>
 
-        <div class="yiyi-field">
-          <label>Mac 24h 公网服务地址（已内置直连 + HTTPS 自动兜底）</label>
-          <input type="text" id="yiyi-opt-mac-url" placeholder="https://draw.fzy.asia/yiyi-mac" />
-          <div class="yiyi-hint">提示：已内置公网地址（HTTP 酒馆优先高速直连，HTTPS 酒馆或直连不通时自动切 HTTPS 隧道）；通常不用改地址，填好下方配置密码即可。</div>
-        </div>
-        <div class="yiyi-field">
-          <label>Windows 本机地址（优先尝试）</label>
-          <input type="text" id="yiyi-opt-local-url" />
-        </div>
-        <div class="yiyi-field">
-          <label>Windows 远程地址（局域网 IP、SSH 隧道或 Cloudflare 地址）</label>
-          <input type="text" id="yiyi-opt-remote-url" />
-        </div>
-        <div class="yiyi-field">
-          <label>配置访问密码（服务已设密时必填）</label>
-          <input type="password" id="yiyi-opt-token" placeholder="请输入配置密码" />
-        </div>
+        <details class="yiyi-adv-details" id="yiyi-adv-details">
+          <summary>⚙️ 连接地址与访问密码设置</summary>
+          <div style="display:flex;flex-direction:column;gap:7px">
+            <div class="yiyi-field">
+              <label>云端网关地址（默认已内置，一般无需修改）</label>
+              <input type="text" id="yiyi-opt-mac-url" placeholder="https://draw.fzy.asia/yiyi-mac" />
+            </div>
+            <div class="yiyi-field">
+              <label>访问密码（与独立生图页一致）</label>
+              <input type="password" id="yiyi-opt-token" placeholder="请输入配置密码" />
+            </div>
+          </div>
+        </details>
       </div>
     `;
 
@@ -2477,6 +2552,18 @@
         toastInfo('已复位悬浮球与画框到默认响应式位置', 'info');
       };
     }
+    const wakeBtn = document.getElementById('yiyi-btn-wake-cloud');
+    if (wakeBtn) {
+      wakeBtn.onclick = () => { wakeCloudFromPanel().catch(() => {}); };
+    }
+    const openStudioBtn = document.getElementById('yiyi-btn-open-studio');
+    if (openStudioBtn) {
+      openStudioBtn.onclick = () => {
+        const st = getSettings();
+        const url = `${(activeGatewayUrl || normalizeStudioUrl(st.macUrl || DEFAULT_MAC_HTTPS_URL) || DEFAULT_MAC_HTTPS_URL).replace(/\/+$/, '')}/`;
+        window.open(url, '_blank', 'noopener,noreferrer');
+      };
+    }
     const testBtn = document.getElementById('yiyi-btn-test');
     if (testBtn) {
       testBtn.onclick = async () => {
@@ -2485,25 +2572,22 @@
           const el = document.getElementById(id);
           if (el) st[key] = el.value;
         };
-        readInput('yiyi-opt-policy', 'backendPolicy');
         readInput('yiyi-opt-mac-url', 'macUrl');
-        readInput('yiyi-opt-local-url', 'localUrl');
-        readInput('yiyi-opt-remote-url', 'remoteUrl');
         readInput('yiyi-opt-token', 'token');
         saveSettings();
 
         const res = await resolveStudioUrl();
         if (res?.ok) {
-          const modeLabel = activeEndpointMode === 'local'
-            ? 'Windows 本机 4060'
-            : activeEndpointMode === 'remote'
-              ? 'Windows 远程 4060'
-              : 'Mac 24h 极速';
-          toastInfo(`连接成功 (${modeLabel})`, 'success');
+          const gpu = String(res.data?.gpu_name || res.data?.gpu_tier || '云端显卡').replace(/^cuda:\d+\s*/i, '').trim();
+          toastInfo(`🟢 当前可以生图！（${gpu} 已就绪）`, 'success');
+        } else if (res?.reason === 'sleeping') {
+          toastInfo('🌙 当前不可生图：云端休眠中（每晚 18:00–01:00 自动开启），点「⚡ 临时唤醒云端」可随时开机', 'info');
+        } else if (res?.reason === 'booting') {
+          toastInfo('⏳ 云端正在开机部署中，请稍候 1~2 分钟', 'info');
         } else {
           const target = res?.url ? ` [${res.url}]` : '';
           toastInfo(
-            `${res?.detail || '暂未连上生图服务，请检查网络与服务状态'}${target}`,
+            `${res?.detail || '暂未连上云端生图服务，请检查网络与服务状态'}${target}`,
             res?.reason === 'auth_error' ? 'error' : 'warning',
           );
         }
@@ -2583,7 +2667,6 @@
     };
 
     bindVal('yiyi-opt-enabled', 'enabled', true);
-    bindVal('yiyi-opt-policy', 'backendPolicy', false, true);
     bindVal('yiyi-opt-engine', 'engine');
     bindVal('yiyi-opt-rating', 'ratingMode');
     bindVal('yiyi-opt-prompt-mode', 'promptMode');
@@ -2592,12 +2675,11 @@
     bindVal('yiyi-opt-memory-mode', 'memoryMode');
     bindVal('yiyi-opt-overlay-mode', 'overlayMode');
     bindVal('yiyi-opt-face-detailer', 'faceDetailer', true);
+    bindVal('yiyi-opt-hand-detailer', 'handDetailer', true);
     bindVal('yiyi-opt-hires', 'hiresFix', true);
     bindVal('yiyi-opt-skip-first', 'skipFirstMessage', true);
     bindVal('yiyi-opt-silent', 'silentOffline', true);
     bindVal('yiyi-opt-mac-url', 'macUrl', false, true);
-    bindVal('yiyi-opt-local-url', 'localUrl', false, true);
-    bindVal('yiyi-opt-remote-url', 'remoteUrl', false, true);
     bindVal('yiyi-opt-token', 'token', false, true);
 
     syncPanelFromSettings();
@@ -2618,8 +2700,7 @@
       else el.value = v ?? '';
     };
     setVal('yiyi-opt-enabled', s.enabled, true);
-    setVal('yiyi-opt-policy', s.backendPolicy || 'mac');
-    setVal('yiyi-opt-engine', s.engine);
+    setVal('yiyi-opt-engine', VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'noctq_v1');
     setVal('yiyi-opt-rating', s.ratingMode);
     setVal('yiyi-opt-prompt-mode', s.promptMode);
     setVal('yiyi-opt-ratio', s.ratio);
@@ -2627,12 +2708,11 @@
     setVal('yiyi-opt-memory-mode', s.memoryMode || (s.autoWorldLore === false ? 'off' : 'smart'));
     setVal('yiyi-opt-overlay-mode', s.overlayMode || 'auto');
     setVal('yiyi-opt-face-detailer', s.faceDetailer !== false, true);
+    setVal('yiyi-opt-hand-detailer', s.handDetailer !== false, true);
     setVal('yiyi-opt-hires', s.hiresFix, true);
     setVal('yiyi-opt-skip-first', s.skipFirstMessage, true);
     setVal('yiyi-opt-silent', s.silentOffline, true);
     setVal('yiyi-opt-mac-url', s.macUrl || DEFAULT_MAC_HTTPS_URL);
-    setVal('yiyi-opt-local-url', s.localUrl);
-    setVal('yiyi-opt-remote-url', s.remoteUrl);
     setVal('yiyi-opt-token', s.token);
     updateConnectionUi();
   }
@@ -2706,7 +2786,12 @@
     const prevMacNorm = typeof existingRaw?.macUrl === 'string'
       ? existingRaw.macUrl.trim().replace(/\/+$/, '')
       : '';
-    const shouldPersistMigration = !!existingRaw && (!prevMacNorm || prevMacNorm === '/yiyi-mac');
+    const shouldPersistMigration = !!existingRaw && (
+      !prevMacNorm ||
+      prevMacNorm === '/yiyi-mac' ||
+      existingRaw.backendPolicy !== 'mac' ||
+      !VALID_CLOUD_ENGINES.has(existingRaw.engine)
+    );
     getSettings();
     if (shouldPersistMigration) {
       saveSettings();

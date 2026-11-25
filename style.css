@@ -1,6 +1,60 @@
 /* CSS freshness marker: index.js compares this with EXT_VERSION and cache-busts a stale sheet. */
 :root {
-  --yiyi-css-ver: "1.8.1";
+  --yiyi-css-ver: "1.9.0";
+}
+
+.yiyi-can-draw-banner {
+  padding: 9px 11px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.yiyi-can-draw-banner.is-ready {
+  border-color: rgba(52, 211, 153, 0.55);
+  background: rgba(6, 78, 59, 0.34);
+  color: #d1fae5;
+}
+.yiyi-can-draw-banner.is-booting {
+  border-color: rgba(251, 191, 36, 0.55);
+  background: rgba(120, 53, 15, 0.32);
+  color: #fef3c7;
+}
+.yiyi-can-draw-banner.is-sleeping {
+  border-color: rgba(129, 140, 248, 0.45);
+  background: rgba(30, 27, 75, 0.45);
+  color: #e0e7ff;
+}
+.yiyi-cloud-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.yiyi-cloud-actions .yiyi-btn {
+  flex: 1;
+  min-width: 110px;
+  padding: 5px 8px;
+  font-size: 11.5px;
+}
+.yiyi-adv-details {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 9px;
+  padding: 6px 9px;
+  background: rgba(15, 23, 42, 0.45);
+}
+.yiyi-adv-details summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: #94a3b8;
+  user-select: none;
+}
+.yiyi-adv-details[open] summary {
+  margin-bottom: 8px;
 }
 
 /* v1.7.1: SillyTavern's `html { transform: translateZ(0) }` makes <html> the containing block of
