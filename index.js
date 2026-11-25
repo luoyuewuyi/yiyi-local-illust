@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '2.0.0';
+  const EXT_VERSION = '2.0.1';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -2338,7 +2338,7 @@
             <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
             <button type="button" class="yiyi-close-btn" id="yiyi-btn-test" title="刷新云端状态" style="flex-shrink:0">↻</button>
           </div>
-          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">👑 Qwen-Image-2.1 Uncensored Omni · 原生中文直出</div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">👑 Qwen-Image-2.1 Noct-Q V4 · 原生中文直出</div>
         </div>
 
         <label class="yiyi-switch-row">
