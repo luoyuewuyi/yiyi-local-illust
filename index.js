@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '1.9.2';
+  const EXT_VERSION = '2.0.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -12,13 +12,7 @@
   ]);
 
   const VALID_CLOUD_ENGINES = new Set([
-    'noctq_v1',
-    'anima_noct',
-    'rouwei_vpred',
-    'anima_artbook',
-    'netayume',
-    'janku_v777',
-    'newbie',
+    'qwen_omni',
   ]);
 
   const DEFAULTS = {
@@ -28,13 +22,13 @@
     remoteUrl: '',
     macUrl: DEFAULT_MAC_HTTPS_URL,
     token: '',
-    engine: 'noctq_v1',
+    engine: 'qwen_omni',
     ratingMode: 'unrestricted',
     promptMode: 'auto_or_tag',
     ratio: '1024x1536',
-    faceDetailer: true,
-    handDetailer: true,
-    hiresFix: true,
+    faceDetailer: false,
+    handDetailer: false,
+    hiresFix: false,
     skipFirstMessage: true,
     silentOffline: true,
     autoWorldLore: true,
@@ -91,7 +85,7 @@
       merged.macUrl = DEFAULT_MAC_HTTPS_URL;
     }
     if (!VALID_CLOUD_ENGINES.has(merged.engine)) {
-      merged.engine = 'noctq_v1';
+      merged.engine = 'qwen_omni';
     }
     if (raw.handDetailer === undefined) {
       merged.handDetailer = true;
@@ -2344,7 +2338,7 @@
             <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
             <button type="button" class="yiyi-close-btn" id="yiyi-btn-test" title="刷新云端状态" style="flex-shrink:0">↻</button>
           </div>
-          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">08:00–02:00 全天常驻 L4 + 27B · 02:00–08:00 休眠省电</div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">👑 Qwen-Image-2.1 Uncensored Omni · 原生中文直出</div>
         </div>
 
         <label class="yiyi-switch-row">
@@ -2355,39 +2349,13 @@
         <button class="yiyi-btn yiyi-btn-primary" id="yiyi-btn-draw-last">🖌️ 为最新楼层立即画一张</button>
 
         <div class="yiyi-field">
-          <label>云端旗舰工作流</label>
-          <select id="yiyi-opt-engine">
-            <option value="noctq_v1">👑 Noct-Q-Anime V1 (10/10 全能王者 · 首选)</option>
-            <option value="anima_noct">🌙 Anima-Noct V2 (9.9/10 多人零串色 · 夜景剧场)</option>
-            <option value="rouwei_vpred">🖌️ RouWei v0.8 V-Pred (9.9/10 厚涂光影封神)</option>
-            <option value="anima_artbook">🎨 Anima v1.1 Artbook (9.8/10 画集柔光)</option>
-            <option value="netayume">💎 NetaYume-Lumina v4 (9.7/10 极净锐利)</option>
-            <option value="janku_v777">⚡ JANKU v7.77 (9.6/10 极速二次元 SDXL)</option>
-            <option value="newbie">✨ NewBie-Exp0.1 XML (9.6/10 XML角色锁定)</option>
+          <label>默认画幅（单步原生高清）</label>
+          <select id="yiyi-opt-ratio">
+            <option value="1024x1536">竖图 1024×1536（推荐）</option>
+            <option value="1344x896">横图 1344×896（双人/场景）</option>
+            <option value="1280x1280">方图 1280×1280</option>
+            <option value="896x1344">极速竖图 896×1344</option>
           </select>
-        </div>
-
-        <div class="yiyi-grid-2">
-          <div class="yiyi-field">
-            <label>默认画幅</label>
-            <select id="yiyi-opt-ratio">
-              <option value="1024x1536">竖图 1024×1536</option>
-              <option value="1344x896">横图 1344×896</option>
-              <option value="1280x1280">方图 1280×1280</option>
-              <option value="832x1216">竖图 832×1216</option>
-              <option value="1216x832">横图 1216×832</option>
-            </select>
-          </div>
-          <div class="yiyi-field">
-            <label>画面尺度</label>
-            <select id="yiyi-opt-rating">
-              <option value="unrestricted">自由 / 无限制</option>
-              <option value="safe">全年龄 (Safe)</option>
-              <option value="sensitive">氛围擦边</option>
-              <option value="nsfw">NSFW 成人</option>
-              <option value="explicit">Explicit 全尺度</option>
-            </select>
-          </div>
         </div>
 
         <div class="yiyi-cloud-actions">
@@ -2399,16 +2367,15 @@
           <summary>⚙️ 高级画面选项与连接密码</summary>
           <div style="display:flex;flex-direction:column;gap:7px">
             <div class="yiyi-field">
-              <label>画面提炼方式</label>
+              <label>触发方式</label>
               <select id="yiyi-opt-prompt-mode">
-                <option value="auto_or_tag">智能(有[IMG]用标签/无则27B提炼)</option>
-                <option value="auto_local">强制云端 27B 提炼画面</option>
+                <option value="auto_or_tag">原生直出（有[IMG]用标签/无则直读中文剧情）</option>
                 <option value="tag_only">仅识别楼层 [IMG:...] 标签</option>
               </select>
             </div>
             <div class="yiyi-field">
-              <label>全局画风偏好（可选，留空跟随剧情）</label>
-              <input type="text" id="yiyi-opt-style" placeholder="例如: anime coloring, rim lighting" />
+              <label>全局画风偏好（可选，直接写中文如“日系二次元剧场版插画”）</label>
+              <input type="text" id="yiyi-opt-style" placeholder="留空跟随剧情，或填：日系二次元厚涂插画" />
             </div>
             <div class="yiyi-field">
               <label>剧情记忆与人物一致性</label>
@@ -2426,9 +2393,6 @@
                 <option value="floor_only">仅挂载到楼层</option>
               </select>
             </div>
-            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-face-detailer" /> ✨ 自动修脸 + 眼神精绘</label>
-            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hand-detailer" /> 🖐️ 自动修手增强</label>
-            <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-hires" /> 💎 IllustrationJaNai 高清重绘</label>
             <label class="yiyi-check-row"><input type="checkbox" id="yiyi-opt-skip-first" /> 跳过开场白（第0层不自动画）</label>
             <div class="yiyi-field">
               <label>云端网关地址（已内置）</label>
@@ -2717,7 +2681,7 @@
       else el.value = v ?? '';
     };
     setVal('yiyi-opt-enabled', s.enabled, true);
-    setVal('yiyi-opt-engine', VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'noctq_v1');
+    setVal('yiyi-opt-engine', VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'qwen_omni');
     setVal('yiyi-opt-rating', s.ratingMode);
     setVal('yiyi-opt-prompt-mode', s.promptMode);
     setVal('yiyi-opt-ratio', s.ratio);

@@ -1,6 +1,6 @@
 /* CSS freshness marker: index.js compares this with EXT_VERSION and cache-busts a stale sheet. */
 :root {
-  --yiyi-css-ver: "1.9.2";
+  --yiyi-css-ver: "2.0.0";
 }
 
 .yiyi-can-draw-banner {
