@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '2.0.1';
+  const EXT_VERSION = '2.1.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -11,9 +11,62 @@
     DEFAULT_MAC_HTTP_URL,
   ]);
 
-  const VALID_CLOUD_ENGINES = new Set([
-    'qwen_omni',
+  const DEFAULT_CLOUD_ENGINES = [
+    {
+      id: 'moss_anime',
+      label: '✨ MOSS 二次元无审查旗舰（默认推荐）',
+      short: 'MOSS二次元',
+      desc: 'Heal BF16 + Anime 0.65 · 28步无审查旗舰',
+      isDefault: true,
+    },
+    {
+      id: 'moss_turbo',
+      label: '⚡ MOSS 酒馆极速无审查（18–26s）',
+      short: 'MOSS极速',
+      desc: 'SFT INT8 + OPD 12步 · 高频跑团首选',
+      isDefault: false,
+    },
+    {
+      id: 'moss_drama',
+      label: '🎭 MOSS 剧情双人 / 精准汉字旗舰',
+      short: 'MOSS剧情',
+      desc: 'SFT BF16 + SLG 28步 · 多人/汉字零翻车',
+      isDefault: false,
+    },
+    {
+      id: 'qwen_omni',
+      label: '👑 Qwen-Image-2.1 Noct-Q V4（兼容备用）',
+      short: 'Qwen',
+      desc: '原有原生中文单步引擎（向后兼容）',
+      isDefault: false,
+    },
+  ];
+
+  const ENGINE_FRIENDLY_META = {
+    moss_anime: { label: '✨ MOSS 二次元无审查旗舰（默认推荐）', short: 'MOSS二次元' },
+    moss_turbo: { label: '⚡ MOSS 酒馆极速无审查（18–26s）', short: 'MOSS极速' },
+    moss_drama: { label: '🎭 MOSS 剧情双人 / 精准汉字旗舰', short: 'MOSS剧情' },
+    qwen_omni: { label: '👑 Qwen-Image-2.1 Noct-Q V4（兼容备用）', short: 'Qwen' },
+    moss_image: { label: '✨ MOSS-Image 顶配无审查', short: 'MOSS' },
+    moss_image_sft: { label: '✨ MOSS-Image SFT（顶配无审查）', short: 'MOSS-SFT' },
+    moss_image_base: { label: '✨ MOSS-Image Base（无审查）', short: 'MOSS-Base' },
+  };
+
+  const LEGACY_REMOVED_ENGINES = new Set([
+    'noctq_v1',
+    'anima_noct',
+    'rouwei_vpred',
+    'anima_artbook',
+    'netayume',
+    'janku_v777',
+    'newbie',
+    'anima',
+    'illustrious',
   ]);
+
+  let runtimeCloudEngines = DEFAULT_CLOUD_ENGINES.map((e) => ({ ...e }));
+  let enginesSyncedFromServer = false;
+  const VALID_CLOUD_ENGINES = new Set(runtimeCloudEngines.map((e) => e.id));
 
   const DEFAULTS = {
     enabled: false,
@@ -22,7 +75,10 @@
     remoteUrl: '',
     macUrl: DEFAULT_MAC_HTTPS_URL,
     token: '',
-    engine: 'qwen_omni',
+    engine: 'moss_anime',
+    engineUserChosen: false,
+    hiresRefine: false,
+    nsfwBoost: false,
     ratingMode: 'unrestricted',
     promptMode: 'auto_or_tag',
     ratio: '1024x1536',
@@ -52,6 +108,7 @@
   let activeProgressLabel = '';
   let overlayIndex = 0;
   let overlayCollapsed = false;
+  let lightboxTarget = null;
   let remoteLatestVersion = '';
   let updateAvailable = false;
   let updateCommitHint = '';
@@ -66,6 +123,171 @@
   let cssWatchBound = false;
   const pendingAutoIds = new Set();
   const runningFloorIds = new Set();
+  const activeRegenTasks = new Map();
+  const deleteConfirmState = new WeakMap();
+  const armedDeleteButtons = new Set();
+  let deleteGlobalResetBound = false;
+  let chatMediaObserver = null;
+  const pendingEnhanceMesIds = new Set();
+  let enhanceBatchTimer = null;
+
+  function getDefaultEngine() {
+    const def = runtimeCloudEngines.find((e) => e.isDefault);
+    return def?.id || runtimeCloudEngines[0]?.id || 'moss_anime';
+  }
+
+  function resolveActiveEngine(settings) {
+    const raw = String(settings?.engine || '').trim();
+    if (raw && VALID_CLOUD_ENGINES.has(raw)) return raw;
+    if (raw && !enginesSyncedFromServer && !LEGACY_REMOVED_ENGINES.has(raw)) {
+      return raw;
+    }
+    return getDefaultEngine();
+  }
+
+  function getEngineDisplayLabel(engineId) {
+    const id = String(engineId || '').trim();
+    if (!id) return getEngineDisplayLabel(getDefaultEngine());
+    const found = runtimeCloudEngines.find((e) => e.id === id);
+    if (found?.label) return found.label;
+    if (ENGINE_FRIENDLY_META[id]?.label) return ENGINE_FRIENDLY_META[id].label;
+    return id;
+  }
+
+  function getEngineShortLabel(engineId) {
+    const id = String(engineId || '').trim();
+    if (!id) return '';
+    const found = runtimeCloudEngines.find((e) => e.id === id);
+    if (found?.short) return found.short;
+    if (ENGINE_FRIENDLY_META[id]?.short) return ENGINE_FRIENDLY_META[id].short;
+    if (found?.label) return found.label.replace(/^[^\w\u4e00-\u9fa5]+/, '').slice(0, 10);
+    return id.slice(0, 10);
+  }
+
+  function normalizeEngineSpec(entry, idx = 0) {
+    if (typeof entry === 'string') {
+      const id = entry.trim();
+      if (!id) return null;
+      const preset = ENGINE_FRIENDLY_META[id];
+      return {
+        id,
+        label: preset?.label || id,
+        short: preset?.short || id.slice(0, 10),
+        isDefault: idx === 0,
+      };
+    }
+    if (!entry || typeof entry !== 'object') return null;
+    const id = String(entry.id || entry.key || entry.engine || entry.value || '').trim();
+    if (!id) return null;
+    const preset = ENGINE_FRIENDLY_META[id];
+    const label = String(entry.label || entry.name || entry.title || preset?.label || id).trim();
+    const short = String(entry.short || entry.badge || preset?.short || label.replace(/^[^\w\u4e00-\u9fa5]+/, '').slice(0, 10)).trim();
+    return {
+      id,
+      label,
+      short,
+      isDefault: !!(entry.default || entry.is_default),
+    };
+  }
+
+  function syncEngineSelectorUi() {
+    const field = document.getElementById('yiyi-engine-field');
+    const sel = document.getElementById('yiyi-opt-engine');
+    const descEl = document.getElementById('yiyi-engine-desc');
+    if (!sel) return;
+    const s = getSettings();
+    const curVal = resolveActiveEngine(s);
+    sel.innerHTML = '';
+    for (const eng of runtimeCloudEngines) {
+      const opt = document.createElement('option');
+      opt.value = eng.id;
+      opt.textContent = eng.label;
+      sel.appendChild(opt);
+    }
+    if (!runtimeCloudEngines.some((e) => e.id === curVal) && curVal) {
+      const opt = document.createElement('option');
+      opt.value = curVal;
+      opt.textContent = getEngineDisplayLabel(curVal);
+      sel.appendChild(opt);
+    }
+    sel.value = curVal;
+    if (descEl) {
+      const activeSpec = runtimeCloudEngines.find((e) => e.id === curVal);
+      const desc = activeSpec?.desc ? String(activeSpec.desc).trim() : '';
+      descEl.textContent = desc;
+      descEl.style.display = desc ? '' : 'none';
+    }
+    if (field) {
+      field.style.display = runtimeCloudEngines.length > 1 ? '' : 'none';
+    }
+  }
+
+  function syncEnginesFromPing(pingData) {
+    if (!pingData || typeof pingData !== 'object') return false;
+    const rawList = pingData.engines || pingData.available_engines || pingData.workflows || null;
+    const engineMetaMap = (pingData.engine_meta && typeof pingData.engine_meta === 'object') ? pingData.engine_meta : {};
+    const defaultId = String(pingData.default_engine || pingData.active_engine || '').trim();
+    const parsed = [];
+    const seen = new Set();
+
+    const pushSpec = (rawItem, fallbackKey = '') => {
+      let spec = null;
+      if (typeof rawItem === 'string') {
+        const id = rawItem.trim();
+        const meta = id ? engineMetaMap[id] : null;
+        spec = meta && typeof meta === 'object'
+          ? normalizeEngineSpec(Object.assign({ id }, meta), parsed.length)
+          : normalizeEngineSpec(id, parsed.length);
+      } else if (rawItem && typeof rawItem === 'object') {
+        const id = String(rawItem.id || rawItem.key || rawItem.engine || fallbackKey || '').trim();
+        const meta = id ? engineMetaMap[id] : null;
+        const merged = Object.assign({ id }, meta && typeof meta === 'object' ? meta : {}, rawItem);
+        spec = normalizeEngineSpec(merged, parsed.length);
+      }
+      if (!spec || seen.has(spec.id)) return;
+      const meta = engineMetaMap[spec.id];
+      if (meta && typeof meta === 'object') {
+        if (meta.desc && !spec.desc) spec.desc = String(meta.desc).trim();
+        if (Number(meta.steps) > 0) spec.steps = Number(meta.steps);
+        if (Number(meta.cfg) > 0) spec.cfg = Number(meta.cfg);
+      }
+      seen.add(spec.id);
+      if (defaultId && spec.id === defaultId) spec.isDefault = true;
+      parsed.push(spec);
+    };
+
+    if (Array.isArray(rawList)) {
+      rawList.forEach((item) => pushSpec(item));
+    } else if (rawList && typeof rawList === 'object') {
+      Object.entries(rawList).forEach(([k, v]) => {
+        if (typeof v === 'string') pushSpec({ id: k, label: v }, k);
+        else if (v && typeof v === 'object') pushSpec(v, k);
+      });
+    } else if (Object.keys(engineMetaMap).length > 0) {
+      Object.entries(engineMetaMap).forEach(([k, v]) => pushSpec(v, k));
+    } else if (defaultId) {
+      pushSpec(defaultId);
+    }
+
+    if (!parsed.length) return false;
+
+    if (!parsed.some((e) => e.isDefault)) {
+      parsed[0].isDefault = true;
+    }
+
+    runtimeCloudEngines = parsed;
+    enginesSyncedFromServer = true;
+    VALID_CLOUD_ENGINES.clear();
+    for (const e of runtimeCloudEngines) VALID_CLOUD_ENGINES.add(e.id);
+
+    const s = getSettings();
+    if (!VALID_CLOUD_ENGINES.has(s.engine)) {
+      s.engine = getDefaultEngine();
+      saveSettings();
+    }
+    syncEngineSelectorUi();
+    return true;
+  }
 
   function getCtx() {
     return window.SillyTavern?.getContext?.() || null;
@@ -84,9 +306,19 @@
     if (!rawMac || rawMac === '/yiyi-mac') {
       merged.macUrl = DEFAULT_MAC_HTTPS_URL;
     }
-    if (!VALID_CLOUD_ENGINES.has(merged.engine)) {
-      merged.engine = 'qwen_omni';
+    const rawEngine = typeof raw.engine === 'string' ? raw.engine.trim() : '';
+    if (!rawEngine || LEGACY_REMOVED_ENGINES.has(rawEngine)) {
+      merged.engine = getDefaultEngine();
+    } else if (rawEngine === 'qwen_omni' && !raw.engineUserChosen && VALID_CLOUD_ENGINES.has('moss_anime')) {
+      // Smoothly upgrade v2.0.1 single-engine users to the new default MOSS flagship unless they manually chose qwen_omni
+      merged.engine = getDefaultEngine();
+    } else if (enginesSyncedFromServer && !VALID_CLOUD_ENGINES.has(rawEngine)) {
+      merged.engine = getDefaultEngine();
+    } else {
+      merged.engine = rawEngine;
     }
+    merged.hiresRefine = !!merged.hiresRefine;
+    merged.nsfwBoost = !!merged.nsfwBoost;
     if (raw.handDetailer === undefined) {
       merged.handDetailer = true;
     }
@@ -844,7 +1076,7 @@
           data,
           detail: data.phase || (isBooting
             ? '云端 GPU 正在开机部署中（约 1~2 分钟），请稍候…'
-            : '当前不可生图：云端 GPU 休眠中（每晚 18:00–01:00 自动开启）'),
+            : `当前不可生图：云端 GPU 休眠中（${data.schedule || '07:00–02:00 全天常驻 · 02:00–07:00 休眠省电'}）`),
         };
       }
       return { ok: true, status: resp.status, url, data };
@@ -1048,6 +1280,7 @@
     if (res.data?.latest_ext_version) {
       remoteLatestVersion = String(res.data.latest_ext_version).trim();
     }
+    syncEnginesFromPing(res.data);
     updateConnectionUi();
     refreshUpdateUi();
     return res;
@@ -1075,6 +1308,7 @@
       if (bestErr.data?.latest_ext_version) {
         remoteLatestVersion = String(bestErr.data.latest_ext_version).trim();
       }
+      syncEnginesFromPing(bestErr.data);
     } else {
       activeGatewayUrl = null;
       activeCloudInfo = null;
@@ -1187,10 +1421,14 @@
         titleEl.textContent = activeBusy
           ? '🎨 当前可以生图（正在排队绘制中）'
           : `🟢 当前可以生图 · L4${llmTag} 就绪`;
+        const curEngShort = getEngineShortLabel(resolveActiveEngine(s));
+        const engNote = curEngShort ? ` · 引擎 ${curEngShort}` : '';
+        const scheduleStr = typeof info.schedule === 'string' && info.schedule.trim() ? info.schedule.trim() : '';
+        const alwaysOnSeg = scheduleStr ? scheduleStr.split(/[·•]/)[0].trim() : '07:00–02:00 全天常驻零等待';
         const modeNote = idleRemMin !== null
           ? ` · 夜间临时唤醒（约 ${idleRemMin} 分钟无操作自动休眠）`
-          : ' · 08:00–02:00 全天常驻零等待';
-        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 L4 在线'}${cuText}${modeNote}`;
+          : ` · ${alwaysOnSeg}`;
+        subEl.textContent = `${gpuName ? `显卡：${gpuName}` : '云端 L4 在线'}${engNote}${cuText}${modeNote}`;
       } else if (activeEndpointMode === 'booting') {
         banner.classList.add('is-booting');
         titleEl.textContent = '⏳ 正在自动唤醒云端 L4（约 2.5 分钟）…';
@@ -1200,8 +1438,11 @@
         titleEl.textContent = autoWake
           ? '🌙 夜间休眠省电中 · 点画图自动唤醒 L4'
           : '🌙 当前不可生图 · 云端休眠省电中';
+        const sleepSchedule = (typeof info.schedule === 'string' && info.schedule.trim())
+          ? info.schedule.trim()
+          : '07:00–02:00 全天常驻，02:00–07:00 休眠省电';
         subEl.textContent = autoWake
-          ? `08:00–02:00 全天常驻，02:00–08:00 休眠省电${cuText}。半夜想画直接点图自动唤醒（约 2.5 分钟）`
+          ? `${sleepSchedule}${cuText}。半夜想画直接点图自动唤醒（约 2.5 分钟）`
           : `休眠省电中${cuText}，可点下方「⚡ 提前唤醒 L4」手动开机`;
       } else if (activeEndpointMode === 'auth_error') {
         titleEl.textContent = '🔒 需要输入访问密码';
@@ -1375,6 +1616,223 @@
     return false;
   }
 
+  function normalizeMediaUrl(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    if (/^data:/i.test(s) || /^blob:/i.test(s)) return s;
+    try {
+      const base = (typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null')
+        ? window.location.origin
+        : 'http://localhost';
+      const u = new URL(s, base);
+      const pathAndQuery = `${u.pathname}${u.search}`;
+      return decodeURIComponent(pathAndQuery);
+    } catch {
+      return s.replace(/^https?:\/\/[^/]+/i, '').split('#')[0];
+    }
+  }
+
+  function escapeRegExp(str) {
+    return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function generateImageUid() {
+    return `yiyi_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function generateFreshSeed(prevSeed = -1) {
+    const prev = Number(prevSeed);
+    let seed = Math.floor(Math.random() * 2147483646) + 1;
+    if (Number.isFinite(prev) && prev > 0 && seed === prev) {
+      seed = (seed % 2147483645) + 2;
+    }
+    return seed;
+  }
+
+  function buildMediaEntry(savedPath, info = {}) {
+    const engineId = String(info.engine || getDefaultEngine()).trim();
+    const width = Number(info.width) || 1024;
+    const height = Number(info.height) || 1536;
+    const prompt = String(info.positive || info.prompt || '').trim();
+    const negative = String(info.negative || '').trim();
+    const chinesePrompt = String(info.chinesePrompt || info.chinese_prompt || '').trim();
+    const seed = Number.isFinite(Number(info.seed)) && Number(info.seed) > 0 ? Number(info.seed) : -1;
+    const metaId = String(info.id || generateImageUid());
+    return {
+      url: savedPath,
+      type: 'image',
+      title: prompt || 'AI Illustration',
+      generation_type: 'free',
+      negative,
+      source: 'generated',
+      yiyi_meta: {
+        id: metaId,
+        engine: engineId,
+        engine_label: getEngineDisplayLabel(engineId),
+        prompt,
+        negative,
+        chinese_prompt: chinesePrompt,
+        width,
+        height,
+        ratio: `${width}x${height}`,
+        seed,
+        style_prefix: String(info.stylePrefix || '').trim(),
+        prompt_mode: String(info.promptMode || 'auto_or_tag'),
+        rating_mode: String(info.ratingMode || 'unrestricted'),
+        detail: {
+          face_detailer: !!info.faceDetailer,
+          hand_detailer: !!info.handDetailer,
+          hires_fix: !!info.hiresFix,
+          hires_refine: !!info.hiresRefine,
+          nsfw_boost: !!info.nsfwBoost,
+        },
+        hires_refine: !!info.hiresRefine,
+        nsfw_boost: !!info.nsfwBoost,
+        created_at: new Date().toISOString(),
+        version: EXT_VERSION,
+      },
+    };
+  }
+
+  function findMediaIndex(mes, targetRef) {
+    const mediaArr = Array.isArray(mes?.extra?.media) ? mes.extra.media : [];
+    if (!mediaArr.length || !targetRef) return -1;
+
+    if (targetRef.itemRef) {
+      const byRef = mediaArr.indexOf(targetRef.itemRef);
+      if (byRef >= 0) return byRef;
+    }
+
+    const metaId = String(targetRef.metaId || targetRef.itemRef?.yiyi_meta?.id || '').trim();
+    if (metaId) {
+      const byId = mediaArr.findIndex((it) => it?.yiyi_meta?.id === metaId);
+      if (byId >= 0) return byId;
+    }
+
+    const targetNorm = normalizeMediaUrl(targetRef.url);
+    const idx = Number(targetRef.mediaIdx);
+    if (Number.isInteger(idx) && idx >= 0 && idx < mediaArr.length) {
+      if (!targetNorm || normalizeMediaUrl(mediaArr[idx]?.url) === targetNorm) {
+        return idx;
+      }
+    }
+
+    if (targetNorm) {
+      const byUrl = mediaArr.findIndex((it) => normalizeMediaUrl(it?.url) === targetNorm);
+      if (byUrl >= 0) return byUrl;
+    }
+
+    return -1;
+  }
+
+  function getUrlVariants(rawUrl) {
+    const out = [];
+    const pushUniq = (val) => {
+      const s = String(val || '').trim();
+      if (s && !out.includes(s)) out.push(s);
+    };
+    const rawTrim = String(rawUrl || '').trim();
+    const norm = normalizeMediaUrl(rawTrim);
+    const noLead = norm.replace(/^\/+/, '');
+    pushUniq(rawTrim);
+    pushUniq(norm);
+    pushUniq(noLead);
+    try {
+      if (norm) pushUniq(encodeURI(norm));
+      if (noLead) pushUniq(encodeURI(noLead));
+    } catch {}
+    return out;
+  }
+
+  function syncSwipeExtraMedia(mes, updatedMesText = false) {
+    if (!mes || typeof mes !== 'object') return;
+    const swipeIdx = mes.swipe_id != null ? Number(mes.swipe_id) : 0;
+    if (updatedMesText && Array.isArray(mes.swipes) && Number.isInteger(swipeIdx) && swipeIdx >= 0 && swipeIdx < mes.swipes.length) {
+      mes.swipes[swipeIdx] = mes.mes;
+    }
+    if (!Array.isArray(mes.swipe_info) || !Number.isInteger(swipeIdx) || swipeIdx < 0) return;
+    const swInfo = mes.swipe_info[swipeIdx];
+    if (!swInfo || typeof swInfo !== 'object') return;
+
+    const hasMedia = Array.isArray(mes.extra?.media) && mes.extra.media.length > 0;
+    const hasLegacyImg = !!(mes.extra && mes.extra.image);
+
+    if (!swInfo.extra && (hasMedia || hasLegacyImg)) {
+      swInfo.extra = {};
+    }
+    if (!swInfo.extra || typeof swInfo.extra !== 'object') return;
+
+    if (hasMedia) {
+      swInfo.extra.media = mes.extra.media.slice();
+      swInfo.extra.media_index = mes.extra.media_index ?? 0;
+      swInfo.extra.media_display = mes.extra.media_display || 'gallery';
+      swInfo.extra.inline_image = !!mes.extra.inline_image;
+    } else {
+      delete swInfo.extra.media;
+      delete swInfo.extra.media_index;
+      delete swInfo.extra.media_display;
+      delete swInfo.extra.inline_image;
+    }
+
+    if (hasLegacyImg) {
+      swInfo.extra.image = mes.extra.image;
+      if (mes.extra.title !== undefined) swInfo.extra.title = mes.extra.title;
+    } else {
+      delete swInfo.extra.image;
+      if (mes.extra?.title === undefined && swInfo.extra.title !== undefined && !hasMedia) {
+        delete swInfo.extra.title;
+      }
+    }
+  }
+
+  function removeInlineImageFromMesText(mes, rawUrl) {
+    if (!mes || typeof mes.mes !== 'string' || !mes.mes || !rawUrl) return false;
+    const variants = getUrlVariants(rawUrl);
+
+    let text = mes.mes;
+    let changed = false;
+    for (const v of variants) {
+      const esc = escapeRegExp(v);
+      const mdRe = new RegExp(`!\\[[^\\]]*\\]\\(\\s*<?(?:https?:\\/\\/[^)\\s]+)?\\/?${esc}>?(?:\\s+(?:"[^"]*"|'[^']*'))?\\s*\\)`, 'i');
+      if (mdRe.test(text)) {
+        text = text.replace(mdRe, '');
+        changed = true;
+        break;
+      }
+      const htmlRe = new RegExp(`<img\\b[^>]*\\bsrc\\s*=\\s*(?:"(?:https?:\\/\\/[^"]+)?\\/?${esc}"|'(?:https?:\\/\\/[^']+)?\\/?${esc}'|(?:https?:\\/\\/[^\\s>]+)?\\/?${esc})[^>]*\\/?>`, 'i');
+      if (htmlRe.test(text)) {
+        text = text.replace(htmlRe, '');
+        changed = true;
+        break;
+      }
+    }
+    if (changed) {
+      mes.mes = text.replace(/\n{3,}/g, '\n\n').trim();
+    }
+    return changed;
+  }
+
+  async function persistChat(ctx) {
+    if (!ctx) return false;
+    try {
+      if (typeof ctx.saveChat === 'function') {
+        await ctx.saveChat();
+        return true;
+      }
+      if (typeof ctx.saveChatConditional === 'function') {
+        await ctx.saveChatConditional();
+        return true;
+      }
+      if (typeof window !== 'undefined' && typeof window.saveChatConditional === 'function') {
+        await window.saveChatConditional();
+        return true;
+      }
+    } catch (err) {
+      console.warn('[yiyi-st] persistChat failed:', err);
+    }
+    return false;
+  }
+
   function collectChatIllustrations() {
     const items = [];
     try {
@@ -1384,17 +1842,44 @@
         const m = chat[i];
         if (!m || m.is_user || m.is_system) continue;
         const mediaArr = Array.isArray(m.extra?.media) ? m.extra.media : [];
+        const imageEntries = [];
         for (let idx = 0; idx < mediaArr.length; idx++) {
           const item = mediaArr[idx];
           if (!item?.url) continue;
           if (item.type && item.type !== 'image') continue;
+          imageEntries.push({ idx, item });
+        }
+        if (imageEntries.length > 0) {
+          imageEntries.forEach(({ idx, item }, pos) => {
+            items.push({
+              mesId: i,
+              mediaIdx: idx,
+              url: item.url,
+              title: String(item.title || '').trim(),
+              negative: String(item.negative || '').trim(),
+              charName: m.name || getActiveCharName() || '角色',
+              meta: item.yiyi_meta || null,
+              metaId: String(item.yiyi_meta?.id || ''),
+              itemRef: item,
+              floorMediaCount: imageEntries.length,
+              floorMediaPos: pos + 1,
+              legacySingleImage: false,
+            });
+          });
+        } else if (m.extra?.image) {
           items.push({
             mesId: i,
-            mediaIdx: idx,
-            url: item.url,
-            title: String(item.title || '').trim(),
-            negative: String(item.negative || '').trim(),
+            mediaIdx: 0,
+            url: String(m.extra.image),
+            title: String(m.extra.title || '').trim(),
+            negative: '',
             charName: m.name || getActiveCharName() || '角色',
+            meta: null,
+            metaId: '',
+            itemRef: null,
+            floorMediaCount: 1,
+            floorMediaPos: 1,
+            legacySingleImage: true,
           });
         }
       }
@@ -1415,23 +1900,361 @@
     }
   }
 
-  function openLightbox(srcUrl) {
+  function resetDeleteConfirmButton(btn) {
+    if (!btn) return;
+    const st = deleteConfirmState.get(btn);
+    if (!st) return;
+    if (st.timer) {
+      clearTimeout(st.timer);
+      st.timer = null;
+    }
+    st.armed = false;
+    armedDeleteButtons.delete(btn);
+    btn.classList.remove('is-confirming');
+    if (st.normalLabel !== undefined) btn.textContent = st.normalLabel;
+    if (st.normalTitle !== undefined) btn.title = st.normalTitle;
+    if (st.cardEl) st.cardEl.classList.remove('is-confirming');
+  }
+
+  function resetAllDeleteConfirms(exceptBtn = null) {
+    for (const btn of Array.from(armedDeleteButtons)) {
+      if (btn !== exceptBtn) resetDeleteConfirmButton(btn);
+    }
+  }
+
+  function ensureDeleteGlobalResetBound() {
+    if (deleteGlobalResetBound || typeof document === 'undefined') return;
+    deleteGlobalResetBound = true;
+    document.addEventListener('click', (e) => {
+      if (!armedDeleteButtons.size) return;
+      for (const btn of Array.from(armedDeleteButtons)) {
+        if (e.target !== btn && !btn.contains?.(e.target)) {
+          resetDeleteConfirmButton(btn);
+        }
+      }
+    }, true);
+  }
+
+  function armDeleteConfirmButton(btn, opts = {}) {
+    if (!btn) return;
+    ensureDeleteGlobalResetBound();
+    const existing = deleteConfirmState.get(btn);
+    if (existing) {
+      existing.onConfirm = opts.onConfirm;
+      existing.cardEl = opts.cardEl || null;
+      if (opts.normalLabel !== undefined) existing.normalLabel = opts.normalLabel;
+      if (opts.confirmLabel !== undefined) existing.confirmLabel = opts.confirmLabel;
+      if (opts.normalTitle !== undefined) existing.normalTitle = opts.normalTitle;
+      if (opts.confirmMs !== undefined) existing.confirmMs = opts.confirmMs;
+      return;
+    }
+    const st = {
+      armed: false,
+      timer: null,
+      normalLabel: opts.normalLabel ?? btn.textContent,
+      confirmLabel: opts.confirmLabel ?? '确认删除？',
+      normalTitle: opts.normalTitle ?? (btn.title || '删除此图'),
+      confirmMs: opts.confirmMs ?? 3000,
+      cardEl: opts.cardEl || null,
+      onConfirm: opts.onConfirm,
+    };
+    deleteConfirmState.set(btn, st);
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (btn.disabled) return;
+      const curSt = deleteConfirmState.get(btn);
+      if (!curSt) return;
+      if (!curSt.armed) {
+        resetAllDeleteConfirms(btn);
+        curSt.armed = true;
+        armedDeleteButtons.add(btn);
+        btn.classList.add('is-confirming');
+        btn.textContent = curSt.confirmLabel;
+        btn.title = '再次点击以永久删除此图（3秒后自动取消）';
+        if (curSt.cardEl) curSt.cardEl.classList.add('is-confirming');
+        curSt.timer = setTimeout(() => resetDeleteConfirmButton(btn), curSt.confirmMs);
+        return;
+      }
+      resetDeleteConfirmButton(btn);
+      if (typeof curSt.onConfirm === 'function') {
+        Promise.resolve(curSt.onConfirm()).catch((err) => {
+          console.error('[yiyi-st] delete failed:', err);
+          toastInfo(err?.message || '删除插画失败', 'error');
+        });
+      }
+    };
+  }
+
+  function makeTaskKey(mesId, targetRef) {
+    const metaId = String(targetRef?.metaId || targetRef?.itemRef?.yiyi_meta?.id || '').trim();
+    if (metaId) return `id:${mesId}:${metaId}`;
+    const norm = normalizeMediaUrl(targetRef?.url);
+    return `pos:${mesId}:${targetRef?.mediaIdx ?? -1}:${norm}`;
+  }
+
+  function isTargetMatchingTask(task, mesId, targetRef) {
+    if (!task || Number(task.mesId) !== Number(mesId)) return false;
+    const tRef = task.targetRef || {};
+    if (tRef.itemRef && targetRef?.itemRef && tRef.itemRef === targetRef.itemRef) return true;
+    const tId = String(tRef.metaId || tRef.itemRef?.yiyi_meta?.id || '').trim();
+    const qId = String(targetRef?.metaId || targetRef?.itemRef?.yiyi_meta?.id || '').trim();
+    if (tId && qId && tId === qId) return true;
+    const tUrl = normalizeMediaUrl(tRef.url);
+    const qUrl = normalizeMediaUrl(targetRef?.url);
+    if (tUrl && qUrl && tUrl === qUrl) {
+      if (tRef.mediaIdx === undefined || targetRef?.mediaIdx === undefined) return true;
+      return Number(tRef.mediaIdx) === Number(targetRef.mediaIdx);
+    }
+    return false;
+  }
+
+  function findActiveRegenTask(mesId, targetRef) {
+    for (const task of activeRegenTasks.values()) {
+      if (isTargetMatchingTask(task, mesId, targetRef)) return task;
+    }
+    return null;
+  }
+
+  function findDirectChildByClass(container, cls) {
+    if (!container?.children) return null;
+    for (const child of container.children) {
+      if (child?.classList?.contains?.(cls)) return child;
+    }
+    return null;
+  }
+
+  function upsertRegenMask(container, task) {
+    if (!container || !task) return;
+    let mask = findDirectChildByClass(container, 'yiyi-img-regen-mask');
+    if (!mask) {
+      mask = document.createElement('div');
+      mask.className = 'yiyi-img-regen-mask';
+      mask.innerHTML = `
+        <div class="yiyi-regen-spinner"></div>
+        <div class="yiyi-regen-title"></div>
+        <div class="yiyi-regen-sub"></div>
+        <div class="yiyi-regen-track"><div class="yiyi-regen-fill"></div></div>
+        <button type="button" class="yiyi-regen-cancel">✕ 取消</button>
+      `;
+      container.appendChild(mask);
+    }
+    mask.dataset.taskKey = task.key;
+    const titleEl = mask.querySelector('.yiyi-regen-title');
+    const subEl = mask.querySelector('.yiyi-regen-sub');
+    const fillEl = mask.querySelector('.yiyi-regen-fill');
+    const cancelBtn = mask.querySelector('.yiyi-regen-cancel');
+    const shortEng = getEngineShortLabel(task.engineId);
+    if (titleEl) titleEl.textContent = shortEng ? `正在用 ${shortEng} 重新绘制…` : '正在重新绘制…';
+    if (subEl) subEl.textContent = task.stageMsg || '准备中…';
+    if (fillEl) fillEl.style.width = `${Math.max(6, Math.min(100, Number(task.pct) || 8))}%`;
+    if (cancelBtn) {
+      cancelBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        cancelRegenTask(task.key);
+      };
+    }
+  }
+
+  function removeRegenMask(container, taskKey = null) {
+    if (!container?.children) return;
+    for (const child of Array.from(container.children)) {
+      if (!child?.classList?.contains?.('yiyi-img-regen-mask')) continue;
+      if (!taskKey || child.dataset?.taskKey === taskKey) {
+        child.remove();
+      }
+    }
+  }
+
+  function renderRegenMasksForTask(task) {
+    if (!task) return;
+    const mesEl = document.querySelector(`.mes[mesid="${task.mesId}"]`);
+    if (mesEl) {
+      mesEl.querySelectorAll('.yiyi-img-card').forEach((card) => {
+        if (isTargetMatchingTask(task, task.mesId, card._yiyiTargetRef)) {
+          card.classList.add('is-regenerating');
+          upsertRegenMask(card, task);
+        }
+      });
+    }
+
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    const ovStage = document.getElementById('yiyi-ov-stage');
+    if (viewer && !viewer.classList.contains('yiyi-hidden') && ovStage && ovStage._yiyiCurrentItem) {
+      const cur = ovStage._yiyiCurrentItem;
+      if (isTargetMatchingTask(task, cur.mesId, cur)) {
+        upsertRegenMask(ovStage, task);
+      }
+    }
+
+    const lb = document.getElementById('yiyi-lightbox');
+    const lbStage = document.getElementById('yiyi-lb-stage');
+    if (lb && !lb.classList.contains('yiyi-hidden') && lbStage && lightboxTarget) {
+      if (isTargetMatchingTask(task, lightboxTarget.mesId, lightboxTarget)) {
+        upsertRegenMask(lbStage, task);
+      }
+    }
+  }
+
+  function clearRegenMasksForTask(task) {
+    if (!task) return;
+    const mesEl = document.querySelector(`.mes[mesid="${task.mesId}"]`);
+    if (mesEl) {
+      mesEl.querySelectorAll('.yiyi-img-card').forEach((card) => {
+        const mask = findDirectChildByClass(card, 'yiyi-img-regen-mask');
+        if (mask && mask.dataset?.taskKey === task.key) {
+          mask.remove();
+          card.classList.remove('is-regenerating');
+        }
+      });
+    }
+    const ovStage = document.getElementById('yiyi-ov-stage');
+    if (ovStage) removeRegenMask(ovStage, task.key);
+    const lbStage = document.getElementById('yiyi-lb-stage');
+    if (lbStage) removeRegenMask(lbStage, task.key);
+  }
+
+  function cancelRegenTask(taskKey, opts = {}) {
+    const task = activeRegenTasks.get(taskKey);
+    if (!task) return false;
+    task.cancelledByUser = true;
+    task.silentCancel = !!opts.silent;
+    try {
+      task.abortCtrl?.abort?.();
+    } catch {}
+    if (task.targetUrl && !opts.skipServerInterrupt) {
+      const s = getSettings();
+      try {
+        fetch(`${task.targetUrl}/api/comfy/interrupt`, {
+          method: 'POST',
+          headers: buildHeaders(s),
+          body: JSON.stringify({ job_id: task.jobId || '' }),
+        }).catch(() => {});
+      } catch {}
+    }
+    clearRegenMasksForTask(task);
+    return true;
+  }
+
+  function renderLightbox() {
+    const lb = document.getElementById('yiyi-lightbox');
+    const stage = document.getElementById('yiyi-lb-stage');
+    const img = document.getElementById('yiyi-lb-img');
+    const metaEl = document.getElementById('yiyi-lb-meta');
+    const prevBtn = document.getElementById('yiyi-lb-prev');
+    const nextBtn = document.getElementById('yiyi-lb-next');
+    const regenBtn = document.getElementById('yiyi-lb-regen');
+    const delBtn = document.getElementById('yiyi-lb-delete');
+    if (!lb || !img || !lightboxTarget) return;
+
+    const items = collectChatIllustrations();
+    let matchedIdx = -1;
+    if (items.length) {
+      matchedIdx = items.findIndex((it) => {
+        if (lightboxTarget.itemRef && it.itemRef === lightboxTarget.itemRef) return true;
+        if (lightboxTarget.metaId && it.metaId && it.metaId === lightboxTarget.metaId) return true;
+        if (
+          lightboxTarget.mesId !== undefined &&
+          Number(it.mesId) === Number(lightboxTarget.mesId) &&
+          normalizeMediaUrl(it.url) === normalizeMediaUrl(lightboxTarget.url)
+        ) {
+          if (lightboxTarget.mediaIdx === undefined || Number(it.mediaIdx) === Number(lightboxTarget.mediaIdx)) {
+            return true;
+          }
+        }
+        return false;
+      });
+      if (matchedIdx < 0 && lightboxTarget.url) {
+        matchedIdx = items.findIndex((it) => normalizeMediaUrl(it.url) === normalizeMediaUrl(lightboxTarget.url));
+      }
+      if (matchedIdx >= 0) {
+        lightboxTarget = items[matchedIdx];
+      }
+    }
+
+    img.src = lightboxTarget.url;
+    if (metaEl) {
+      if (matchedIdx >= 0) {
+        const cur = items[matchedIdx];
+        const eng = cur.meta?.engine ? ` · ${getEngineShortLabel(cur.meta.engine)}` : '';
+        const floorMulti = cur.floorMediaCount > 1 ? ` (图${cur.floorMediaPos}/${cur.floorMediaCount})` : '';
+        metaEl.textContent = `${cur.charName} · 第 ${cur.mesId} 层${floorMulti}${eng} · ${matchedIdx + 1}/${items.length}`;
+      } else if (lightboxTarget.mesId !== undefined) {
+        metaEl.textContent = `第 ${lightboxTarget.mesId} 层插画`;
+      } else {
+        metaEl.textContent = '插画大图预览';
+      }
+    }
+
+    const canNav = items.length > 1 && matchedIdx >= 0;
+    if (prevBtn) prevBtn.style.display = canNav ? '' : 'none';
+    if (nextBtn) nextBtn.style.display = canNav ? '' : 'none';
+
+    const canMutate = lightboxTarget.mesId !== undefined && lightboxTarget.mesId !== null;
+    if (regenBtn) {
+      regenBtn.style.display = canMutate ? '' : 'none';
+      const curEngLabel = getEngineDisplayLabel(resolveActiveEngine(getSettings()));
+      regenBtn.title = `使用新随机种子重新生成（当前引擎：${curEngLabel}）`;
+    }
+    if (delBtn) {
+      delBtn.style.display = canMutate ? '' : 'none';
+      resetDeleteConfirmButton(delBtn);
+    }
+
+    if (stage) {
+      removeRegenMask(stage);
+      if (canMutate) {
+        const activeTask = findActiveRegenTask(lightboxTarget.mesId, lightboxTarget);
+        if (activeTask) upsertRegenMask(stage, activeTask);
+      }
+    }
+  }
+
+  function stepLightbox(delta) {
+    if (!lightboxTarget) return;
+    const items = collectChatIllustrations();
+    if (items.length <= 1) return;
+    let curIdx = items.findIndex((it) =>
+      (lightboxTarget.itemRef && it.itemRef === lightboxTarget.itemRef) ||
+      (lightboxTarget.metaId && it.metaId === lightboxTarget.metaId) ||
+      (Number(it.mesId) === Number(lightboxTarget.mesId) && Number(it.mediaIdx) === Number(lightboxTarget.mediaIdx))
+    );
+    if (curIdx < 0) curIdx = 0;
+    const nextIdx = (curIdx + delta + items.length) % items.length;
+    lightboxTarget = items[nextIdx];
+    renderLightbox();
+  }
+
+  function openLightbox(srcOrTarget) {
     const lb = document.getElementById('yiyi-lightbox');
     const img = document.getElementById('yiyi-lb-img');
-    if (!lb || !img || !srcUrl) return;
-    img.src = srcUrl;
+    if (!lb || !img || !srcOrTarget) return;
+    if (typeof srcOrTarget === 'string') {
+      const items = collectChatIllustrations();
+      const found = items.find((it) => normalizeMediaUrl(it.url) === normalizeMediaUrl(srcOrTarget));
+      lightboxTarget = found || { url: srcOrTarget };
+    } else if (srcOrTarget && srcOrTarget.url) {
+      lightboxTarget = { ...srcOrTarget };
+    } else {
+      return;
+    }
     lb.classList.remove('yiyi-hidden');
+    renderLightbox();
     syncTopLayer(lb, true, true);
   }
 
   function closeLightbox() {
     const lb = document.getElementById('yiyi-lightbox');
     if (!lb) return;
+    const delBtn = document.getElementById('yiyi-lb-delete');
+    if (delBtn) resetDeleteConfirmButton(delBtn);
+    lightboxTarget = null;
     syncTopLayer(lb, false);
     lb.classList.add('yiyi-hidden');
   }
 
-  function renderOverlayViewer(preferredMesId = null) {
+  function renderOverlayViewer(preferredMesId = null, preferredTargetRef = null) {
     const viewer = document.getElementById('yiyi-overlay-viewer');
     if (!viewer) return;
     const items = collectChatIllustrations();
@@ -1440,12 +2263,16 @@
     const metaEl = document.getElementById('yiyi-ov-meta');
     const promptEl = document.getElementById('yiyi-ov-prompt-text');
     const redrawBtn = document.getElementById('yiyi-ov-redraw');
+    const deleteBtn = document.getElementById('yiyi-ov-delete');
     const zoomBtn = document.getElementById('yiyi-ov-zoom');
+
+    if (deleteBtn) resetDeleteConfirmButton(deleteBtn);
 
     if (!items.length) {
       overlayIndex = 0;
       if (titleEl) titleEl.textContent = '🖼️ 依依同层悬浮画框';
       if (stageEl) {
+        stageEl._yiyiCurrentItem = null;
         stageEl.innerHTML = '';
         const empty = document.createElement('div');
         empty.className = 'yiyi-ov-empty';
@@ -1454,12 +2281,26 @@
       }
       if (metaEl) metaEl.textContent = '共 0 张 · 随时可生成';
       if (promptEl) promptEl.textContent = '';
-      if (redrawBtn) redrawBtn.dataset.mesId = '';
-      if (zoomBtn) zoomBtn.dataset.url = '';
+      if (redrawBtn) {
+        redrawBtn.dataset.mesId = '';
+        redrawBtn.title = '为最新楼层生成插画';
+      }
+      if (deleteBtn) deleteBtn.disabled = true;
+      if (zoomBtn) {
+        zoomBtn.dataset.url = '';
+        zoomBtn.disabled = true;
+      }
       return;
     }
 
-    if (preferredMesId !== null && preferredMesId !== undefined) {
+    if (preferredTargetRef) {
+      const idx = items.findIndex((it) =>
+        (preferredTargetRef.itemRef && it.itemRef === preferredTargetRef.itemRef) ||
+        (preferredTargetRef.metaId && it.metaId && it.metaId === preferredTargetRef.metaId) ||
+        (Number(it.mesId) === Number(preferredTargetRef.mesId) && Number(it.mediaIdx) === Number(preferredTargetRef.mediaIdx))
+      );
+      if (idx >= 0) overlayIndex = idx;
+    } else if (preferredMesId !== null && preferredMesId !== undefined) {
       let foundIdx = -1;
       for (let i = items.length - 1; i >= 0; i--) {
         if (Number(items[i].mesId) === Number(preferredMesId)) {
@@ -1469,30 +2310,43 @@
       }
       overlayIndex = foundIdx >= 0 ? foundIdx : items.length - 1;
     } else if (overlayIndex < 0 || overlayIndex >= items.length) {
-      overlayIndex = items.length - 1;
+      overlayIndex = Math.max(0, Math.min(overlayIndex, items.length - 1));
     }
 
     const cur = items[overlayIndex];
-    if (titleEl) titleEl.textContent = `🖼️ ${cur.charName} · 第 ${cur.mesId} 层`;
+    const engShort = cur.meta?.engine ? ` · ${getEngineShortLabel(cur.meta.engine)}` : '';
+    const floorSub = cur.floorMediaCount > 1 ? ` (图${cur.floorMediaPos}/${cur.floorMediaCount})` : '';
+    if (titleEl) titleEl.textContent = `🖼️ ${cur.charName} · 第 ${cur.mesId} 层${floorSub}`;
     if (stageEl) {
+      stageEl._yiyiCurrentItem = cur;
       stageEl.innerHTML = '';
       const img = document.createElement('img');
       img.src = cur.url;
       img.alt = `第 ${cur.mesId} 层插画`;
-      img.onclick = () => openLightbox(cur.url);
+      img.onclick = () => openLightbox(cur);
       stageEl.appendChild(img);
+      const activeTask = findActiveRegenTask(cur.mesId, cur);
+      if (activeTask) upsertRegenMask(stageEl, activeTask);
     }
-    if (metaEl) metaEl.textContent = `第 ${overlayIndex + 1} / ${items.length} 张 · 第 ${cur.mesId} 层`;
+    if (metaEl) metaEl.textContent = `第 ${overlayIndex + 1} / ${items.length} 张 · 第 ${cur.mesId} 层${engShort}`;
     if (promptEl) {
+      const seedInfo = cur.meta?.seed > 0 ? `\n\nSeed: ${cur.meta.seed}` : '';
       promptEl.textContent = cur.title
-        ? `Positive:\n${cur.title}${cur.negative ? `\n\nNegative:\n${cur.negative}` : ''}`
+        ? `Positive:\n${cur.title}${cur.negative ? `\n\nNegative:\n${cur.negative}` : ''}${seedInfo}`
         : '（未记录提示词）';
     }
-    if (redrawBtn) redrawBtn.dataset.mesId = String(cur.mesId);
-    if (zoomBtn) zoomBtn.dataset.url = cur.url;
+    if (redrawBtn) {
+      redrawBtn.dataset.mesId = String(cur.mesId);
+      redrawBtn.title = `原地重画当前插画（当前引擎：${getEngineDisplayLabel(resolveActiveEngine(getSettings()))}）`;
+    }
+    if (deleteBtn) deleteBtn.disabled = false;
+    if (zoomBtn) {
+      zoomBtn.dataset.url = cur.url;
+      zoomBtn.disabled = false;
+    }
   }
 
-  function showOverlayViewer(preferredMesId = null) {
+  function showOverlayViewer(preferredMesId = null, preferredTargetRef = null) {
     const viewer = document.getElementById('yiyi-overlay-viewer');
     if (!viewer) return;
     overlayCollapsed = false;
@@ -1500,7 +2354,7 @@
     viewer.classList.remove('yiyi-hidden');
     const collapseBtn = document.getElementById('yiyi-ov-collapse');
     if (collapseBtn) collapseBtn.textContent = '—';
-    renderOverlayViewer(preferredMesId);
+    renderOverlayViewer(preferredMesId, preferredTargetRef);
     syncTopLayer(viewer, true, true);
     layoutResponsiveHud();
   }
@@ -1508,6 +2362,8 @@
   function hideOverlayViewer() {
     const viewer = document.getElementById('yiyi-overlay-viewer');
     if (!viewer) return;
+    const delBtn = document.getElementById('yiyi-ov-delete');
+    if (delBtn) resetDeleteConfirmButton(delBtn);
     syncTopLayer(viewer, false);
     viewer.classList.add('yiyi-hidden');
   }
@@ -1586,6 +2442,433 @@
     mesEl?.querySelector('.yiyi-floor-status')?.remove();
   }
 
+  function showEmptyFloorDrawBar(mesEl, mesId) {
+    if (!mesEl) return;
+    mesEl.querySelectorAll('.yiyi-empty-draw-bar').forEach((n) => n.remove());
+    const bar = document.createElement('div');
+    bar.className = 'yiyi-empty-draw-bar';
+    bar.dataset.mesId = String(mesId);
+
+    const text = document.createElement('span');
+    text.textContent = '已移除本层插画';
+
+    const drawBtn = document.createElement('button');
+    drawBtn.type = 'button';
+    drawBtn.className = 'yiyi-img-action-btn is-regen';
+    drawBtn.textContent = '🖌️ 重新生成一张';
+    drawBtn.title = '为本楼层重新绘制插画';
+    drawBtn.onclick = (e) => {
+      e.stopPropagation();
+      bar.remove();
+      illustrateFloor(mesId, true);
+    };
+
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'yiyi-img-action-btn is-icon-only';
+    dismissBtn.textContent = '✕';
+    dismissBtn.title = '关闭提示（随时可点楼层右上角 🎨 再次生图）';
+    dismissBtn.onclick = (e) => {
+      e.stopPropagation();
+      bar.remove();
+    };
+
+    bar.append(text, drawBtn, dismissBtn);
+    const textEl = mesEl.querySelector('.mes_text');
+    if (textEl && textEl.parentNode) {
+      textEl.parentNode.insertBefore(bar, textEl.nextSibling);
+    } else {
+      mesEl.appendChild(bar);
+    }
+  }
+
+  function syncFloorMediaDom(mesId, opts = {}) {
+    const idNum = Number(mesId);
+    const ctx = getCtx();
+    const mes = ctx?.chat?.[idNum];
+    const mesEl = document.querySelector(`.mes[mesid="${idNum}"]`);
+    if (!mes || !mesEl) return;
+
+    mesEl.querySelectorAll('.yiyi-empty-draw-bar').forEach((n) => n.remove());
+    mesEl.querySelectorAll('.yiyi-fallback-media-list').forEach((n) => n.remove());
+
+    const mediaArr = Array.isArray(mes.extra?.media) ? mes.extra.media : [];
+    const hasImages = mediaArr.some((it) => it?.url && (!it.type || it.type === 'image')) || !!mes.extra?.image;
+    const jq = window.$ || window.jQuery;
+
+    if (typeof ctx.appendMediaToMessage === 'function' && typeof jq === 'function') {
+      const mediaWrapper = mesEl.querySelector('.mes_media_wrapper');
+      // Clean any stray fallback imgs outside ST's native containers
+      mesEl.querySelectorAll('img.mes_img, .yiyi-img-card').forEach((node) => {
+        if (!node.closest('.mes_media_wrapper') && !node.closest('.mes_img_container') && !node.closest('.mes_text')) {
+          node.remove();
+        }
+      });
+
+      if (hasImages) {
+        // In SillyTavern v1.19+, appendMediaToMessage asynchronously populates .mes_media_wrapper
+        // after image preload; do not wipe .mes_img_container beforehand to avoid white flash/height jump.
+        if (!mediaWrapper) {
+          mesEl.querySelectorAll('.mes_img_container').forEach((c) => {
+            c.innerHTML = '';
+          });
+        }
+        try {
+          ctx.appendMediaToMessage(mes, jq(mesEl));
+        } catch (err) {
+          console.warn('[yiyi-st] appendMediaToMessage error:', err);
+        }
+        // Fallback re-enhance hooks after ST's async Promise.race completes
+        setTimeout(() => enhanceFloorMediaCards(idNum), 160);
+        setTimeout(() => enhanceFloorMediaCards(idNum), 450);
+      } else {
+        try {
+          ctx.appendMediaToMessage(mes, jq(mesEl));
+        } catch {}
+        if (mediaWrapper) {
+          // Keep .mes_media_wrapper shell intact while clearing all cloned .mes_img_container children
+          mediaWrapper.innerHTML = '';
+        }
+        mesEl.querySelectorAll('.mes_img_container').forEach((c) => {
+          c.innerHTML = '';
+        });
+      }
+    } else {
+      // Pure DOM fallback when ST's appendMediaToMessage is absent
+      mesEl.querySelectorAll('img.mes_img, .yiyi-img-card').forEach((node) => {
+        if (!node.closest('.mes_text')) node.remove();
+      });
+      if (hasImages) {
+        const list = document.createElement('div');
+        list.className = 'yiyi-fallback-media-list';
+        if (mediaArr.length > 0) {
+          mediaArr.forEach((item, idx) => {
+            if (!item?.url || (item.type && item.type !== 'image')) return;
+            const img = document.createElement('img');
+            img.src = item.url;
+            img.className = 'mes_img';
+            img.dataset.yiyiMediaIdx = String(idx);
+            if (item.yiyi_meta?.id) img.dataset.yiyiImgId = item.yiyi_meta.id;
+            img.style.maxWidth = '100%';
+            img.style.borderRadius = '8px';
+            list.appendChild(img);
+          });
+        } else if (mes.extra?.image) {
+          const img = document.createElement('img');
+          img.src = mes.extra.image;
+          img.className = 'mes_img';
+          img.dataset.yiyiMediaIdx = '0';
+          img.style.maxWidth = '100%';
+          img.style.borderRadius = '8px';
+          list.appendChild(img);
+        }
+        const textEl = mesEl.querySelector('.mes_text');
+        if (textEl && textEl.parentNode) {
+          textEl.parentNode.insertBefore(list, textEl.nextSibling);
+        } else {
+          mesEl.appendChild(list);
+        }
+      }
+    }
+
+    if (opts.removedInlineUrl) {
+      const normRemoved = normalizeMediaUrl(opts.removedInlineUrl);
+      mesEl.querySelectorAll('.mes_text img').forEach((img) => {
+        if (normalizeMediaUrl(img.getAttribute('src') || img.src) === normRemoved) {
+          const card = img.closest('.yiyi-img-card');
+          if (card) card.remove();
+          else img.remove();
+        }
+      });
+    }
+
+    injectFloorButton(idNum);
+    if (hasImages) {
+      enhanceFloorMediaCards(idNum);
+    } else if (opts.showEmptyPrompt) {
+      showEmptyFloorDrawBar(mesEl, idNum);
+    }
+  }
+
+  function enhanceFloorMediaCards(mesId) {
+    const idNum = Number(mesId);
+    const ctx = getCtx();
+    const mes = ctx?.chat?.[idNum];
+    if (!mes || mes.is_user || mes.is_system) return;
+    const mesEl = document.querySelector(`.mes[mesid="${idNum}"]`);
+    if (!mesEl) return;
+
+    const mediaArr = Array.isArray(mes.extra?.media) ? mes.extra.media : [];
+    const imageMediaCount = mediaArr.filter((it) => it?.url && (!it.type || it.type === 'image')).length;
+    const rawImgs = Array.from(
+      mesEl.querySelectorAll(
+        '.mes_media_wrapper img, .mes_img_container img, .mes_media_list img, .mes_media img, .yiyi-fallback-media-list img, img.mes_img, .mes_text img'
+      ),
+    );
+    const imgs = [];
+    const seenImgs = new Set();
+    for (const img of rawImgs) {
+      if (!img || seenImgs.has(img)) continue;
+      if (img.closest('.avatar, .yiyi-img-toolbar, .yiyi-img-regen-mask')) continue;
+      const src = img.getAttribute('src') || img.src || '';
+      if (!src) continue;
+      // For inline images inside .mes_text, strictly wrap only user-uploaded / yiyi illustrations
+      // (never wrap character emojis, status-bar icons, or external decorative images).
+      const inMesText = !!img.closest('.mes_text') && !img.closest('.mes_img_container') && !img.closest('.mes_media_wrapper');
+      if (inMesText && !/(?:^|\/)user\/images\//i.test(src) && !src.includes('yiyi_') && !img.classList.contains('mes_img')) {
+        continue;
+      }
+      seenImgs.add(img);
+      imgs.push(img);
+    }
+
+    const usedMediaIndices = new Set();
+    const activeGalleryIdx = Number(mes.extra?.media_index);
+
+    for (const img of imgs) {
+      const rawSrc = img.getAttribute('src') || img.src || '';
+      const normSrc = normalizeMediaUrl(rawSrc);
+      const isInlineMesImg = !!img.closest('.mes_text') && !img.closest('.mes_img_container') && !img.closest('.mes_media_wrapper');
+      let matchedIdx = -1;
+      let matchedItem = null;
+      let legacySingleImage = false;
+
+      if (!isInlineMesImg && mediaArr.length > 0) {
+        const attrId = img.dataset?.yiyiImgId || img.closest?.('[data-yiyi-img-id]')?.dataset?.yiyiImgId || '';
+        if (attrId) {
+          const byId = mediaArr.findIndex((it, i) => !usedMediaIndices.has(i) && it?.yiyi_meta?.id === attrId);
+          if (byId >= 0) matchedIdx = byId;
+        }
+        if (matchedIdx < 0) {
+          const attrIdxRaw = img.dataset?.yiyiMediaIdx ?? img.closest?.('[data-index]')?.getAttribute?.('data-index');
+          if (attrIdxRaw !== undefined && attrIdxRaw !== null && attrIdxRaw !== '') {
+            const candIdx = Number(attrIdxRaw);
+            if (
+              Number.isInteger(candIdx) &&
+              candIdx >= 0 &&
+              candIdx < mediaArr.length &&
+              !usedMediaIndices.has(candIdx) &&
+              normalizeMediaUrl(mediaArr[candIdx]?.url) === normSrc
+            ) {
+              matchedIdx = candIdx;
+            }
+          }
+        }
+        // In ST gallery mode, only the active media_index is mounted: prioritize it when URL matches.
+        if (
+          matchedIdx < 0 &&
+          imgs.length === 1 &&
+          Number.isInteger(activeGalleryIdx) &&
+          activeGalleryIdx >= 0 &&
+          activeGalleryIdx < mediaArr.length &&
+          normalizeMediaUrl(mediaArr[activeGalleryIdx]?.url) === normSrc
+        ) {
+          matchedIdx = activeGalleryIdx;
+        }
+        if (matchedIdx < 0) {
+          matchedIdx = mediaArr.findIndex(
+            (it, i) => !usedMediaIndices.has(i) && it?.url && normalizeMediaUrl(it.url) === normSrc,
+          );
+        }
+        if (matchedIdx >= 0) {
+          usedMediaIndices.add(matchedIdx);
+          matchedItem = mediaArr[matchedIdx];
+        }
+      } else if (!isInlineMesImg && mes.extra?.image && normalizeMediaUrl(mes.extra.image) === normSrc) {
+        matchedIdx = 0;
+        legacySingleImage = true;
+      }
+
+      if (matchedIdx < 0 && !isInlineMesImg) continue;
+
+      const wrapTarget = (img.parentElement && img.parentElement.tagName === 'A' && !img.parentElement.classList.contains('yiyi-img-card'))
+        ? img.parentElement
+        : img;
+
+      let card = wrapTarget.parentElement?.classList?.contains('yiyi-img-card')
+        ? wrapTarget.parentElement
+        : null;
+      if (!card) {
+        card = document.createElement('div');
+        card.className = 'yiyi-img-card';
+        if (wrapTarget.parentNode) {
+          wrapTarget.parentNode.insertBefore(card, wrapTarget);
+          card.appendChild(wrapTarget);
+        }
+      }
+
+      const targetRef = {
+        mesId: idNum,
+        mediaIdx: matchedIdx,
+        url: matchedItem?.url || (legacySingleImage ? String(mes.extra.image) : rawSrc),
+        meta: matchedItem?.yiyi_meta || null,
+        metaId: String(matchedItem?.yiyi_meta?.id || ''),
+        itemRef: matchedItem,
+        title: String(matchedItem?.title || (legacySingleImage ? mes.extra?.title : '') || '').trim(),
+        negative: String(matchedItem?.negative || '').trim(),
+        legacySingleImage,
+        isInlineMesImg,
+      };
+
+      const prevRef = card._yiyiTargetRef;
+      const targetChanged = !prevRef ||
+        prevRef.metaId !== targetRef.metaId ||
+        prevRef.mediaIdx !== targetRef.mediaIdx ||
+        normalizeMediaUrl(prevRef.url) !== normalizeMediaUrl(targetRef.url);
+
+      card._yiyiTargetRef = targetRef;
+      card.dataset.mesId = String(idNum);
+      card.dataset.mediaIdx = String(matchedIdx);
+      card.dataset.yiyiUrl = targetRef.url;
+      if (targetRef.metaId) card.dataset.yiyiImgId = targetRef.metaId;
+      else delete card.dataset.yiyiImgId;
+      if (targetRef.meta?.engine) card.dataset.yiyiEngine = targetRef.meta.engine;
+      else delete card.dataset.yiyiEngine;
+      if (targetRef.meta?.seed > 0) card.dataset.yiyiSeed = String(targetRef.meta.seed);
+      else delete card.dataset.yiyiSeed;
+
+      let toolbar = findDirectChildByClass(card, 'yiyi-img-toolbar');
+      if (!toolbar) {
+        toolbar = document.createElement('div');
+        toolbar.className = 'yiyi-img-toolbar';
+        toolbar.innerHTML = `
+          <span class="yiyi-img-badge" style="display:none"></span>
+          <button type="button" class="yiyi-img-action-btn is-icon-only yiyi-act-zoom" title="大图预览">🔍</button>
+          <button type="button" class="yiyi-img-action-btn is-regen yiyi-act-regen" title="使用新种子重新生成">🔄 重画</button>
+          <button type="button" class="yiyi-img-action-btn is-danger yiyi-act-del" title="删除此图">🗑️ 删除</button>
+        `;
+        card.appendChild(toolbar);
+      }
+
+      const badgeEl = toolbar.querySelector('.yiyi-img-badge');
+      const zoomBtn = toolbar.querySelector('.yiyi-act-zoom');
+      const regenBtn = toolbar.querySelector('.yiyi-act-regen');
+      const delBtn = toolbar.querySelector('.yiyi-act-del');
+
+      if (targetChanged && delBtn) {
+        resetDeleteConfirmButton(delBtn);
+      }
+
+      if (badgeEl) {
+        const parts = [];
+        if (imageMediaCount > 1 && matchedIdx >= 0) {
+          let pos = 0;
+          for (let k = 0; k <= matchedIdx; k++) {
+            const it = mediaArr[k];
+            if (it?.url && (!it.type || it.type === 'image')) pos += 1;
+          }
+          parts.push(`${pos}/${imageMediaCount}`);
+        }
+        const engShort = getEngineShortLabel(targetRef.meta?.engine);
+        if (engShort) parts.push(engShort);
+        if (parts.length) {
+          badgeEl.textContent = parts.join(' · ');
+          badgeEl.style.display = '';
+        } else {
+          badgeEl.textContent = '';
+          badgeEl.style.display = 'none';
+        }
+      }
+
+      if (zoomBtn) {
+        zoomBtn.onclick = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          openLightbox(card._yiyiTargetRef);
+        };
+      }
+
+      if (regenBtn) {
+        const curEngLabel = getEngineDisplayLabel(resolveActiveEngine(getSettings()));
+        regenBtn.title = `使用新种子原地重画（当前引擎：${curEngLabel}）`;
+        regenBtn.onclick = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          regenerateImage(idNum, card._yiyiTargetRef);
+        };
+      }
+
+      if (delBtn) {
+        armDeleteConfirmButton(delBtn, {
+          normalLabel: '🗑️ 删除',
+          confirmLabel: '确认删除？',
+          normalTitle: '删除此插画',
+          cardEl: card,
+          onConfirm: () => removeImageFromFloor(idNum, card._yiyiTargetRef),
+        });
+      }
+
+      const activeTask = findActiveRegenTask(idNum, targetRef);
+      if (activeTask) {
+        card.classList.add('is-regenerating');
+        upsertRegenMask(card, activeTask);
+      } else {
+        card.classList.remove('is-regenerating');
+        removeRegenMask(card);
+      }
+    }
+  }
+
+  function enhanceAllVisibleFloorMedia() {
+    document.querySelectorAll('#chat .mes[mesid]').forEach((el) => {
+      const id = el.getAttribute('mesid');
+      if (id !== null) enhanceFloorMediaCards(id);
+    });
+  }
+
+  function scheduleFloorMediaEnhance(mesId) {
+    if (mesId === null || mesId === undefined || mesId === '') return;
+    pendingEnhanceMesIds.add(Number(mesId));
+    if (enhanceBatchTimer) return;
+    enhanceBatchTimer = setTimeout(() => {
+      enhanceBatchTimer = null;
+      const ids = Array.from(pendingEnhanceMesIds);
+      pendingEnhanceMesIds.clear();
+      for (const id of ids) {
+        enhanceFloorMediaCards(id);
+      }
+    }, 60);
+  }
+
+  function ensureChatMediaObserver() {
+    if (chatMediaObserver || typeof MutationObserver !== 'function') return;
+    const chatEl = document.getElementById('chat');
+    if (!chatEl) return;
+    try {
+      chatMediaObserver = new MutationObserver((mutations) => {
+        for (const mut of mutations) {
+          const target = mut.target;
+          if (!target) continue;
+          if (target.closest?.('.yiyi-img-toolbar, .yiyi-img-regen-mask, .yiyi-floor-status, .yiyi-empty-draw-bar')) {
+            continue;
+          }
+          if (mut.type === 'childList') {
+            let ownOnly = true;
+            for (const n of [...mut.addedNodes, ...mut.removedNodes]) {
+              const cls = n?.className && typeof n.className === 'string' ? n.className : '';
+              if (!cls.includes('yiyi-')) {
+                ownOnly = false;
+                break;
+              }
+            }
+            if (ownOnly) continue;
+          }
+          const mesEl = target.closest?.('.mes[mesid]');
+          if (mesEl) {
+            const mid = mesEl.getAttribute('mesid');
+            if (mid !== null) scheduleFloorMediaEnhance(mid);
+          }
+        }
+      });
+      chatMediaObserver.observe(chatEl, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src'],
+      });
+    } catch {}
+  }
+
   function formatHttpErr(status, action, bodyText = '') {
     const snippet = String(bodyText || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
     if (status === 401 || status === 403) return `${action}失败 (${status})：配置密码未填或已失效，请在悬浮窗核对密码`;
@@ -1595,12 +2878,35 @@
     return `${action}失败 (HTTP ${status})${snippet ? `：${snippet}` : ''}`;
   }
 
-  async function uploadImageToSillyTavern(base64Data, format, chName) {
+  function sleepWithSignal(ms, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        const err = new Error('已取消生成');
+        err.name = 'AbortError';
+        reject(err);
+        return;
+      }
+      const onAbort = () => {
+        clearTimeout(timer);
+        const err = new Error('已取消生成');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener?.('abort', onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+    });
+  }
+
+  async function uploadImageToSillyTavern(base64Data, format, chName, signal = null) {
     const ctx = getCtx();
     const headers = ctx.getRequestHeaders();
     const resp = await fetch('/api/images/upload', {
       method: 'POST',
       headers,
+      signal: signal || undefined,
       body: JSON.stringify({
         image: base64Data,
         format: format || 'webp',
@@ -1622,56 +2928,718 @@
     return data.path;
   }
 
-  async function attachImageToFloor(mesId, savedPath, positivePrompt, negativePrompt) {
+  function isUrlReferencedInChat(ctx, targetUrl) {
+    const norm = normalizeMediaUrl(targetUrl);
+    if (!norm) return false;
+    const variants = getUrlVariants(targetUrl);
+    const textContainsRef = (txt) => typeof txt === 'string' && txt.length > 0 && variants.some((v) => txt.includes(v));
+    const chat = ctx?.chat || [];
+    for (const m of chat) {
+      if (!m || typeof m !== 'object') continue;
+      if (Array.isArray(m.extra?.media)) {
+        if (m.extra.media.some((it) => it?.url && normalizeMediaUrl(it.url) === norm)) return true;
+      }
+      if (m.extra?.image && normalizeMediaUrl(m.extra.image) === norm) return true;
+      if (Array.isArray(m.swipe_info)) {
+        for (const sw of m.swipe_info) {
+          if (Array.isArray(sw?.extra?.media) && sw.extra.media.some((it) => it?.url && normalizeMediaUrl(it.url) === norm)) {
+            return true;
+          }
+          if (sw?.extra?.image && normalizeMediaUrl(sw.extra.image) === norm) return true;
+        }
+      }
+      if (textContainsRef(m.mes)) {
+        return true;
+      }
+      if (Array.isArray(m.swipes) && m.swipes.some((swText) => textContainsRef(swText))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function deleteOrphanImageFromSillyTavern(ctx, savedPath) {
+    const raw = String(savedPath || '').trim();
+    if (!raw || /^https?:\/\//i.test(raw) || /^data:/i.test(raw) || /^blob:/i.test(raw)) {
+      return false;
+    }
+    if (!/(?:^|\/)user\/images\//i.test(raw) && !raw.includes('yiyi_')) {
+      return false;
+    }
+    if (isUrlReferencedInChat(ctx, raw)) {
+      return false;
+    }
+    if (!ctx || typeof ctx.getRequestHeaders !== 'function' || typeof fetch !== 'function') {
+      return false;
+    }
+    try {
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, ctx.getRequestHeaders() || {});
+      const resp = await fetch('/api/images/delete', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ path: raw }),
+      });
+      return !!resp?.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function removeImageFromFloor(mesId, targetRef) {
+    const idNum = Number(mesId);
     const ctx = getCtx();
-    const mes = ctx?.chat?.[mesId];
-    const mesEl = document.querySelector(`.mes[mesid="${mesId}"]`);
-    if (!mes) return;
+    const mes = ctx?.chat?.[idNum];
+    if (!mes) return { ok: false, reason: 'missing_message' };
+
+    // Cancel any active regeneration task targeting this exact image first
+    const runningTask = findActiveRegenTask(idNum, targetRef);
+    if (runningTask) {
+      cancelRegenTask(runningTask.key, { silent: true });
+    }
+
+    const hadTargetUrl = String(targetRef?.url || '').trim();
+    const targetNorm = normalizeMediaUrl(hadTargetUrl);
+    let removed = false;
+    let removedEntry = null;
+    let removedIdx = -1;
+    let removedUrl = hadTargetUrl;
+    let mesTextChanged = false;
+
+    // Capture lightbox gallery index BEFORE mutating chat so deletion advances to the adjacent image
+    const lbBefore = document.getElementById('yiyi-lightbox');
+    const lbOpenBefore = !!(lbBefore && !lbBefore.classList.contains('yiyi-hidden') && lightboxTarget);
+    let prevLbIdx = -1;
+    if (lbOpenBefore) {
+      const itemsBefore = collectChatIllustrations();
+      prevLbIdx = itemsBefore.findIndex((it) =>
+        (lightboxTarget.itemRef && it.itemRef === lightboxTarget.itemRef) ||
+        (lightboxTarget.metaId && it.metaId && it.metaId === lightboxTarget.metaId) ||
+        (Number(it.mesId) === Number(lightboxTarget.mesId) &&
+          Number(it.mediaIdx) === Number(lightboxTarget.mediaIdx) &&
+          normalizeMediaUrl(it.url) === normalizeMediaUrl(lightboxTarget.url))
+      );
+    }
 
     if (!mes.extra || typeof mes.extra !== 'object') {
       mes.extra = {};
     }
-    const jq = window.$ || window.jQuery;
+
+    if (Array.isArray(mes.extra.media) && mes.extra.media.length > 0 && !targetRef?.isInlineMesImg) {
+      const idx = findMediaIndex(mes, targetRef);
+      if (idx >= 0) {
+        const [spliced] = mes.extra.media.splice(idx, 1);
+        removedEntry = spliced || null;
+        removedIdx = idx;
+        removed = true;
+        removedUrl = removedEntry?.url || removedUrl;
+
+        if (mes.extra.media.length === 0) {
+          delete mes.extra.media;
+          delete mes.extra.media_index;
+          delete mes.extra.media_display;
+          delete mes.extra.inline_image;
+        } else {
+          const prevIndex = Number(mes.extra.media_index);
+          if (!Number.isInteger(prevIndex) || prevIndex >= mes.extra.media.length) {
+            mes.extra.media_index = mes.extra.media.length - 1;
+          } else if (idx < prevIndex) {
+            mes.extra.media_index = Math.max(0, prevIndex - 1);
+          }
+        }
+      }
+    }
+
+    // Clear legacy single-image field if it points to the removed image
+    if (mes.extra.image && (!targetNorm || normalizeMediaUrl(mes.extra.image) === targetNorm || targetRef?.legacySingleImage)) {
+      removedUrl = String(mes.extra.image) || removedUrl;
+      delete mes.extra.image;
+      if (!mes.extra.media) {
+        delete mes.extra.title;
+      }
+      removed = true;
+    }
+
+    // Also strip matching inline markdown/HTML image tag in mes.mes (handles no-leading-slash & encoded variants)
+    if (removedUrl && typeof mes.mes === 'string' && mes.mes) {
+      const textUpdated = removeInlineImageFromMesText(mes, removedUrl);
+      if (textUpdated) {
+        mesTextChanged = true;
+        removed = true;
+      }
+    }
+
+    if (!removed) {
+      return { ok: false, reason: 'not_found' };
+    }
+
+    syncSwipeExtraMedia(mes, mesTextChanged);
+
+    const remainingCount = Array.isArray(mes.extra?.media) ? mes.extra.media.length : (mes.extra?.image ? 1 : 0);
+    syncFloorMediaDom(idNum, {
+      showEmptyPrompt: remainingCount === 0,
+      removedInlineUrl: mesTextChanged ? removedUrl : '',
+    });
+
+    const saved = await persistChat(ctx);
+    if (removedUrl) {
+      // Best-effort orphan file cleanup on SillyTavern v1.19+ (only when no other message/swipe references it)
+      deleteOrphanImageFromSillyTavern(ctx, removedUrl).catch(() => {});
+    }
+    updateGalleryBadge();
+
+    // Sync Overlay Viewer
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    if (viewer && !viewer.classList.contains('yiyi-hidden')) {
+      renderOverlayViewer();
+    }
+
+    // Sync Lightbox if it was displaying this removed image
+    const lb = document.getElementById('yiyi-lightbox');
+    if (lb && !lb.classList.contains('yiyi-hidden') && lightboxTarget) {
+      let sameLb = false;
+      if (lightboxTarget.itemRef && removedEntry) {
+        sameLb = lightboxTarget.itemRef === removedEntry;
+      } else if (lightboxTarget.metaId && targetRef?.metaId) {
+        sameLb = Number(lightboxTarget.mesId) === idNum && lightboxTarget.metaId === targetRef.metaId;
+      } else {
+        sameLb =
+          Number(lightboxTarget.mesId) === idNum &&
+          (!removedEntry || lightboxTarget.mediaIdx === undefined || Number(lightboxTarget.mediaIdx) === removedIdx) &&
+          !!targetNorm &&
+          normalizeMediaUrl(lightboxTarget.url) === targetNorm;
+      }
+      if (sameLb) {
+        const allLeft = collectChatIllustrations();
+        if (allLeft.length > 0) {
+          const nextIdx = prevLbIdx >= 0 ? Math.min(prevLbIdx, allLeft.length - 1) : 0;
+          lightboxTarget = allLeft[nextIdx];
+          renderLightbox();
+        } else {
+          closeLightbox();
+        }
+      } else {
+        renderLightbox();
+      }
+    }
+
+    toastInfo(
+      remainingCount === 0
+        ? '🗑️ 已永久删除插画（随时可点楼层 🎨 或快捷按钮重新生成）'
+        : '🗑️ 已从聊天记录中永久删除该插画',
+      'info',
+    );
+    return { ok: true, remainingCount, saved, mesTextChanged };
+  }
+
+  async function attachImageToFloor(mesId, savedPath, positivePrompt, negativePrompt, metaInfo = {}) {
+    const idNum = Number(mesId);
+    const ctx = getCtx();
+    const mes = ctx?.chat?.[idNum];
+    const mesEl = document.querySelector(`.mes[mesid="${idNum}"]`);
+    if (!mes) return null;
+
+    if (!mes.extra || typeof mes.extra !== 'object') {
+      mes.extra = {};
+    }
     if (typeof ctx.ensureMessageMediaIsArray === 'function') {
       ctx.ensureMessageMediaIsArray(mes);
     }
     if (!Array.isArray(mes.extra.media)) {
       mes.extra.media = [];
     }
-    mes.extra.media.push({
-      url: savedPath,
-      type: 'image',
-      title: positivePrompt || 'AI Illustration',
-      generation_type: 'free',
-      negative: negativePrompt || '',
-      source: 'generated',
+
+    const entry = buildMediaEntry(savedPath, {
+      ...metaInfo,
+      positive: positivePrompt,
+      negative: negativePrompt,
     });
+    mes.extra.media.push(entry);
     mes.extra.media_display = 'gallery';
     mes.extra.media_index = mes.extra.media.length - 1;
     mes.extra.inline_image = true;
+    syncSwipeExtraMedia(mes, false);
 
-    if (mesEl) {
-      if (typeof ctx.appendMediaToMessage === 'function' && typeof jq === 'function') {
-        ctx.appendMediaToMessage(mes, jq(mesEl));
-      } else {
-        const img = document.createElement('img');
-        img.src = savedPath;
-        img.className = 'mes_img';
-        img.style.maxWidth = '100%';
-        img.style.borderRadius = '8px';
-        mesEl.querySelector('.mes_text')?.after(img);
-      }
-    }
-
-    if (typeof ctx.saveChat === 'function') {
-      await ctx.saveChat();
-    }
+    syncFloorMediaDom(idNum);
+    await persistChat(ctx);
 
     updateGalleryBadge();
     const s = getSettings();
     const mode = s.overlayMode || 'auto';
     if (mode === 'always' || (mode !== 'floor_only' && isSameFloorOverlayActive(mesEl))) {
-      showOverlayViewer(mesId);
+      showOverlayViewer(idNum, { mesId: idNum, itemRef: entry, metaId: entry.yiyi_meta.id });
+    } else {
+      const viewer = document.getElementById('yiyi-overlay-viewer');
+      if (viewer && !viewer.classList.contains('yiyi-hidden')) {
+        renderOverlayViewer(idNum, { mesId: idNum, itemRef: entry, metaId: entry.yiyi_meta.id });
+      }
+    }
+    return entry;
+  }
+
+  async function buildIllustratePayload(ctx, idNum, mes, settings, regenOpts = null) {
+    const recentLines = [];
+    for (let i = Math.max(0, idNum - 3); i < idNum; i++) {
+      const m = ctx.chat[i];
+      if (m && !m.is_system && m.mes) {
+        const prevClean = cleanFloorForDistill(m.mes, false);
+        if (prevClean) {
+          recentLines.push(`${m.name || (m.is_user ? ctx.name1 : ctx.name2)}: ${prevClean.slice(-280)}`);
+        }
+      }
+    }
+
+    const rawFloor = typeof mes.mes === 'string' ? mes.mes : '';
+    let cleanedFloor = cleanFloorForDistill(rawFloor, true) || rawFloor.trim();
+    const recentContext = recentLines.join('\n');
+    const charName = mes.name || getActiveCharName();
+
+    const oldMeta = regenOpts?.meta || null;
+    const rawSavedPrompt = String(oldMeta?.prompt || regenOpts?.title || '').trim();
+    const savedPrompt = rawSavedPrompt && rawSavedPrompt !== 'AI Illustration' ? rawSavedPrompt : '';
+    const savedChinesePrompt = String(oldMeta?.chinese_prompt || '').trim();
+
+    if (!cleanedFloor && savedPrompt) {
+      cleanedFloor = `[IMG: ${savedPrompt}]`;
+    }
+    if (!cleanedFloor) {
+      throw new Error('该楼层正文与提示词均为空，无法生成插画');
+    }
+
+    const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, settings, rawFloor);
+
+    const [ratioWStr, ratioHStr] = (settings.ratio || '1024x1536').split('x');
+    const defaultW = parseInt(ratioWStr, 10) || 1024;
+    const defaultH = parseInt(ratioHStr, 10) || 1536;
+    const width = (regenOpts && !regenOpts.useCurrentRatio && Number(oldMeta?.width) > 0)
+      ? Number(oldMeta.width)
+      : defaultW;
+    const height = (regenOpts && !regenOpts.useCurrentRatio && Number(oldMeta?.height) > 0)
+      ? Number(oldMeta.height)
+      : defaultH;
+
+    const reqEngine = regenOpts?.engine || resolveActiveEngine(settings);
+    const prevSeed = Number(oldMeta?.seed);
+    const freshSeed = generateFreshSeed(prevSeed);
+
+    const detail = oldMeta?.detail && typeof oldMeta.detail === 'object' ? oldMeta.detail : null;
+    const faceDetailer = detail ? !!detail.face_detailer : (settings.faceDetailer !== false);
+    const handDetailer = detail ? !!detail.hand_detailer : (settings.handDetailer !== false);
+    const hiresFix = detail ? !!detail.hires_fix : !!settings.hiresFix;
+    const hiresRefine = regenOpts && typeof regenOpts.hiresRefine === 'boolean'
+      ? regenOpts.hiresRefine
+      : (typeof settings.hiresRefine === 'boolean' ? settings.hiresRefine : !!(oldMeta?.hires_refine ?? detail?.hires_refine));
+    const nsfwBoost = regenOpts && typeof regenOpts.nsfwBoost === 'boolean'
+      ? regenOpts.nsfwBoost
+      : (typeof settings.nsfwBoost === 'boolean' ? settings.nsfwBoost : !!(oldMeta?.nsfw_boost ?? detail?.nsfw_boost));
+    const stylePrefix = (oldMeta && typeof oldMeta.style_prefix === 'string' && oldMeta.style_prefix.trim())
+      ? oldMeta.style_prefix.trim()
+      : (settings.stylePrefix || '').trim();
+    const promptMode = regenOpts
+      ? ((settings.promptMode === 'tag_only' && !/\[IMG\s*:|<img_prompt>/i.test(cleanedFloor)) ? 'auto_or_tag' : (settings.promptMode || 'auto_or_tag'))
+      : (settings.promptMode || 'auto_or_tag');
+    const ratingMode = oldMeta?.rating_mode || settings.ratingMode || 'unrestricted';
+
+    const payload = {
+      floor_text: cleanedFloor,
+      recent_context: recentContext,
+      char_name: charName,
+      char_appearance: '',
+      style_prefix: stylePrefix,
+      world_mode: true,
+      world_context: '',
+      memory_context: lore.memoryContext,
+      prev_visual_prompt: lore.prevVisualPrompt,
+      matched_characters: '',
+      user_name: lore.userName,
+      user_appearance: lore.userAppearance,
+      prompt_mode: promptMode,
+      engine: reqEngine,
+      rating_mode: ratingMode,
+      width,
+      height,
+      steps: 0,
+      cfg: 0,
+      seed: freshSeed,
+      face_detailer: faceDetailer,
+      hand_detailer: handDetailer,
+      hires_fix: hiresFix,
+      hires_refine: hiresRefine,
+      nsfw_boost: nsfwBoost,
+      return_base64: true,
+      image_format: 'webp',
+    };
+
+    if (regenOpts) {
+      payload.regenerate = true;
+      payload.force_new_seed = true;
+      if (Number.isFinite(prevSeed) && prevSeed > 0) payload.prev_seed = prevSeed;
+      if (savedPrompt) payload.saved_prompt = savedPrompt;
+      if (savedChinesePrompt) payload.chinese_prompt = savedChinesePrompt;
+    }
+
+    return {
+      payload,
+      charName,
+      metaSeed: {
+        engine: reqEngine,
+        width,
+        height,
+        seed: freshSeed,
+        stylePrefix,
+        promptMode,
+        ratingMode,
+        faceDetailer,
+        handDetailer,
+        hiresFix,
+        hiresRefine,
+        nsfwBoost,
+        chinesePrompt: savedChinesePrompt,
+      },
+    };
+  }
+
+  async function executeIllustrateRequest({
+    targetUrl,
+    settings,
+    payload,
+    charName,
+    signal = null,
+    onProgress = null,
+    onJobStarted = null,
+  }) {
+    const startResp = await fetch(`${targetUrl}/api/st/illustrate/start`, {
+      method: 'POST',
+      headers: buildHeaders(settings),
+      signal: signal || undefined,
+      body: JSON.stringify(payload),
+    });
+    if (!startResp.ok) {
+      const errBody = await startResp.text().catch(() => '');
+      throw new Error(formatHttpErr(startResp.status, '启动生图任务', errBody));
+    }
+    const { job_id } = await startResp.json();
+    onJobStarted?.(job_id);
+
+    // Poll job state cleanly (tolerates up to 4 transient mobile/Cloudflare blips & 15 min total for auto-wake)
+    let jobData = null;
+    let transientErrors = 0;
+    const deadline = Date.now() + 900000;
+    while (Date.now() < deadline) {
+      await sleepWithSignal(1100, signal);
+      let jr;
+      try {
+        jr = await fetch(`${targetUrl}/api/jobs/${job_id}`, {
+          method: 'GET',
+          headers: buildHeaders(settings),
+          signal: signal || undefined,
+        });
+      } catch (netErr) {
+        if (netErr?.name === 'AbortError' || signal?.aborted) throw netErr;
+        transientErrors += 1;
+        if (transientErrors > 3) {
+          throw new Error(`查询生图进度中断：${netErr?.message || '网络连接断开'}`);
+        }
+        await sleepWithSignal(1200, signal);
+        continue;
+      }
+      if (!jr.ok) {
+        if (jr.status === 502 || jr.status === 503 || jr.status === 504) {
+          transientErrors += 1;
+          if (transientErrors <= 3) {
+            await sleepWithSignal(1200, signal);
+            continue;
+          }
+        }
+        const errBody = await jr.text().catch(() => '');
+        throw new Error(formatHttpErr(jr.status, '查询生图进度', errBody));
+      }
+      transientErrors = 0;
+      jobData = await jr.json();
+
+      if (jobData.status === 'done') break;
+      if (jobData.status === 'error') throw new Error(jobData.error || '服务端渲染出错');
+      if (jobData.status === 'cancelled') throw new Error('生成已中断');
+
+      let pct = 15;
+      let msg = jobData.status_message || '处理中…';
+      if (jobData.status === 'distilling') pct = 18;
+      else if (jobData.status === 'preparing') pct = 28;
+      else if (jobData.status === 'running') {
+        const stepPct = jobData.max_steps ? (jobData.step / jobData.max_steps) * 60 : 10;
+        pct = 30 + stepPct;
+        if (jobData.max_steps) {
+          msg = `${jobData.node_title || '绘制中'} (${jobData.step}/${jobData.max_steps})`;
+        }
+      } else if (jobData.status === 'saving') {
+        pct = 93;
+      }
+      onProgress?.(msg, pct);
+    }
+
+    if (!jobData || jobData.status !== 'done') {
+      throw new Error('生成超时（超过 15 分钟未完成），请检查服务端状态或切到更快的引擎');
+    }
+
+    const res = jobData.extra_result || {};
+    if (res.skipped) {
+      return { skipped: true, res };
+    }
+    if (!res.image_base64) {
+      throw new Error('未收到图像数据');
+    }
+
+    if (signal?.aborted) {
+      const err = new Error('已取消生成');
+      err.name = 'AbortError';
+      throw err;
+    }
+
+    onProgress?.('正在保存到酒馆楼层…', 97);
+    const savedPath = await uploadImageToSillyTavern(
+      res.image_base64,
+      res.image_format || 'webp',
+      charName,
+      signal,
+    );
+    return { skipped: false, savedPath, res };
+  }
+
+  async function regenerateImage(mesId, targetRef, opts = {}) {
+    const idNum = Number(mesId);
+    const ctx = getCtx();
+    const mes = ctx?.chat?.[idNum];
+    if (!mes || mes.is_user || mes.is_system) {
+      return { ok: false, reason: 'invalid_message' };
+    }
+
+    const existingTask = findActiveRegenTask(idNum, targetRef);
+    if (existingTask) {
+      toastInfo('这张插画正在重新绘制中，请稍候或点遮罩上的取消按钮~', 'info');
+      return { ok: false, reason: 'already_running' };
+    }
+
+    // Resolve live item snapshot (without mutating anything yet!)
+    let liveIdx = -1;
+    let liveItem = null;
+    if (!targetRef?.isInlineMesImg && Array.isArray(mes.extra?.media)) {
+      liveIdx = findMediaIndex(mes, targetRef);
+      if (liveIdx >= 0) liveItem = mes.extra.media[liveIdx];
+    }
+    const isLegacySingle = !liveItem && !targetRef?.isInlineMesImg && !!mes.extra?.image;
+    const isInlineImg = !!targetRef?.isInlineMesImg;
+    if (!liveItem && !isLegacySingle && !isInlineImg) {
+      toastInfo('未找到要重画的目标图片，请刷新页面后重试', 'warning');
+      return { ok: false, reason: 'target_not_found' };
+    }
+
+    const resolvedRef = {
+      mesId: idNum,
+      mediaIdx: liveIdx >= 0 ? liveIdx : (targetRef?.mediaIdx ?? 0),
+      url: liveItem?.url || (isLegacySingle ? String(mes.extra.image) : String(targetRef?.url || '')),
+      meta: liveItem?.yiyi_meta || targetRef?.meta || null,
+      metaId: String(liveItem?.yiyi_meta?.id || targetRef?.metaId || ''),
+      itemRef: liveItem || targetRef?.itemRef || null,
+      title: String(liveItem?.title || targetRef?.title || (isLegacySingle ? mes.extra?.title : '') || '').trim(),
+      legacySingleImage: isLegacySingle,
+      isInlineMesImg: isInlineImg,
+    };
+
+    const s = getSettings();
+    const reqEngine = opts.engine || resolveActiveEngine(s);
+    const origSwipeId = mes.swipe_id != null ? Number(mes.swipe_id) : 0;
+    const taskKey = makeTaskKey(idNum, resolvedRef);
+    const abortCtrl = typeof AbortController === 'function' ? new AbortController() : { signal: { aborted: false }, abort() { this.signal.aborted = true; } };
+    const task = {
+      key: taskKey,
+      mesId: idNum,
+      origSwipeId,
+      targetRef: resolvedRef,
+      abortCtrl,
+      jobId: '',
+      targetUrl: '',
+      engineId: reqEngine,
+      stageMsg: '正在连接云端生图服务…',
+      pct: 6,
+      cancelledByUser: false,
+      silentCancel: false,
+    };
+    activeRegenTasks.set(taskKey, task);
+    renderRegenMasksForTask(task);
+
+    try {
+      const conn = await resolveStudioUrl();
+      if (abortCtrl.signal.aborted) {
+        const err = new Error('已取消生成');
+        err.name = 'AbortError';
+        throw err;
+      }
+
+      const canAutoWake = !conn?.ok && (conn?.reason === 'sleeping' || conn?.reason === 'booting') && !!activeGatewayUrl && conn?.data?.auto_wake !== false;
+      const targetUrl = conn?.ok ? activeStudioUrl : (canAutoWake ? activeGatewayUrl : null);
+
+      if (!targetUrl) {
+        const target = conn?.url ? ` [${conn.url}]` : '';
+        throw new Error(`${conn?.detail || '暂未连上云端生图服务，请检查网络与服务状态'}${target}`);
+      }
+      task.targetUrl = targetUrl;
+
+      const initMsg = canAutoWake
+        ? '⚡ 正在自动唤醒云端 GPU（约 2.5 分钟）…'
+        : '正在提取剧情特征并分配新随机种子…';
+      task.stageMsg = initMsg;
+      task.pct = 10;
+      renderRegenMasksForTask(task);
+      setGlobalProgress(initMsg, 10, false);
+
+      const { payload, charName, metaSeed } = await buildIllustratePayload(ctx, idNum, mes, s, {
+        meta: resolvedRef.meta,
+        title: resolvedRef.title,
+        engine: reqEngine,
+        useCurrentRatio: !!opts.useCurrentRatio,
+        hiresRefine: typeof opts.hiresRefine === 'boolean' ? opts.hiresRefine : undefined,
+        nsfwBoost: typeof opts.nsfwBoost === 'boolean' ? opts.nsfwBoost : undefined,
+      });
+
+      if (abortCtrl.signal.aborted) {
+        const err = new Error('已取消生成');
+        err.name = 'AbortError';
+        throw err;
+      }
+
+      const execRes = await executeIllustrateRequest({
+        targetUrl,
+        settings: s,
+        payload,
+        charName,
+        signal: abortCtrl.signal,
+        onJobStarted: (jid) => {
+          task.jobId = jid;
+        },
+        onProgress: (msg, pct) => {
+          task.stageMsg = msg;
+          task.pct = pct;
+          renderRegenMasksForTask(task);
+          setGlobalProgress(msg, pct, false);
+        },
+      });
+
+      if (abortCtrl.signal.aborted) {
+        const err = new Error('已取消生成');
+        err.name = 'AbortError';
+        throw err;
+      }
+
+      if (execRes.skipped) {
+        throw new Error('后端跳过绘制，已保留原图');
+      }
+
+      const res = execRes.res || {};
+      const newEntry = buildMediaEntry(execRes.savedPath, {
+        ...metaSeed,
+        engine: res.engine || metaSeed.engine,
+        positive: res.positive || resolvedRef.title || '',
+        negative: res.negative || '',
+        chinesePrompt: res.chinese_prompt || metaSeed.chinesePrompt || '',
+        seed: Number(res.seed) > 0 ? Number(res.seed) : metaSeed.seed,
+      });
+
+      // Atomic safe replacement: only after upload succeeded, verify swipe unchanged & locate live index
+      // (protects against swipe switching or concurrent deletion of another image in the same floor!)
+      const curSwipeId = mes.swipe_id != null ? Number(mes.swipe_id) : 0;
+      if (curSwipeId !== origSwipeId) {
+        return { ok: false, cancelled: true, reason: 'swiped_during_regen' };
+      }
+      if (!mes.extra || typeof mes.extra !== 'object') mes.extra = {};
+      let mesTextChanged = false;
+      let replacedIdx = -1;
+
+      if (isInlineImg) {
+        mesTextChanged = removeInlineImageFromMesText(mes, resolvedRef.url);
+        if (!Array.isArray(mes.extra.media)) mes.extra.media = [];
+        mes.extra.media.push(newEntry);
+        replacedIdx = mes.extra.media.length - 1;
+        mes.extra.media_display = 'gallery';
+        mes.extra.media_index = replacedIdx;
+        mes.extra.inline_image = true;
+      } else if (Array.isArray(mes.extra.media) && mes.extra.media.length > 0) {
+        const commitIdx = findMediaIndex(mes, resolvedRef);
+        if (commitIdx < 0) {
+          // The original image was deleted while regenerating — do not resurrect it
+          return { ok: false, reason: 'target_deleted_during_regen' };
+        }
+        mes.extra.media[commitIdx] = newEntry;
+        mes.extra.media_index = commitIdx;
+        mes.extra.media_display = mes.extra.media_display || 'gallery';
+        mes.extra.inline_image = true;
+        replacedIdx = commitIdx;
+      } else if (isLegacySingle && mes.extra.image) {
+        delete mes.extra.image;
+        delete mes.extra.title;
+        mes.extra.media = [newEntry];
+        mes.extra.media_display = 'gallery';
+        mes.extra.media_index = 0;
+        mes.extra.inline_image = true;
+        replacedIdx = 0;
+      } else {
+        return { ok: false, reason: 'target_deleted_during_regen' };
+      }
+
+      syncSwipeExtraMedia(mes, mesTextChanged);
+      activeRegenTasks.delete(taskKey);
+      clearRegenMasksForTask(task);
+
+      syncFloorMediaDom(idNum, { removedInlineUrl: mesTextChanged ? resolvedRef.url : '' });
+      await persistChat(ctx);
+      if (resolvedRef.url && normalizeMediaUrl(resolvedRef.url) !== normalizeMediaUrl(newEntry.url)) {
+        // Best-effort cleanup of replaced orphan image on SillyTavern disk (only if unreferenced elsewhere)
+        deleteOrphanImageFromSillyTavern(ctx, resolvedRef.url).catch(() => {});
+      }
+      updateGalleryBadge();
+
+      const newRef = {
+        mesId: idNum,
+        mediaIdx: replacedIdx,
+        url: newEntry.url,
+        meta: newEntry.yiyi_meta,
+        metaId: newEntry.yiyi_meta.id,
+        itemRef: newEntry,
+      };
+
+      const viewer = document.getElementById('yiyi-overlay-viewer');
+      if (viewer && !viewer.classList.contains('yiyi-hidden')) {
+        renderOverlayViewer(idNum, newRef);
+      }
+
+      const lb = document.getElementById('yiyi-lightbox');
+      if (lb && !lb.classList.contains('yiyi-hidden') && lightboxTarget) {
+        if (isTargetMatchingTask(task, lightboxTarget.mesId, lightboxTarget)) {
+          lightboxTarget = newRef;
+        }
+        renderLightbox();
+      }
+
+      const engName = getEngineShortLabel(newEntry.yiyi_meta.engine) || newEntry.yiyi_meta.engine;
+      const elapsedSuffix = res.elapsed ? ` (${res.elapsed}s)` : '';
+      toastInfo(`✨ 已用 ${engName} 重新生成并替换插画${elapsedSuffix}`, 'success');
+      return { ok: true, entry: newEntry, index: replacedIdx };
+    } catch (err) {
+      const isCancelled = err?.name === 'AbortError' || task.cancelledByUser || abortCtrl.signal.aborted;
+      if (isCancelled) {
+        if (!task.silentCancel) {
+          toastInfo('已取消重新生成，已保留原图', 'info');
+        }
+        return { ok: false, cancelled: true };
+      }
+      console.error('[yiyi-st] regenerateImage failed:', err);
+      toastInfo(`重新生成失败（已保留原图）：${err?.message || '未知错误'}`, 'error');
+      return { ok: false, error: err?.message || String(err) };
+    } finally {
+      activeRegenTasks.delete(taskKey);
+      clearRegenMasksForTask(task);
+      if (runningFloorIds.size === 0 && activeRegenTasks.size === 0) {
+        clearGlobalProgress();
+      }
+      resolveStudioUrl().catch(() => {});
     }
   }
 
@@ -1715,137 +3683,31 @@
         toastInfo('⚡ 正在自动唤醒云端 L4（约 2.5 分钟），就绪后自动出图，30 分钟不用自动关停~', 'info');
       }
 
-      const recentLines = [];
-      for (let i = Math.max(0, idNum - 3); i < idNum; i++) {
-        const m = ctx.chat[i];
-        if (m && !m.is_system && m.mes) {
-          const prevClean = cleanFloorForDistill(m.mes, false);
-          if (prevClean) {
-            recentLines.push(`${m.name || (m.is_user ? ctx.name1 : ctx.name2)}: ${prevClean.slice(-280)}`);
-          }
-        }
-      }
+      const { payload, charName, metaSeed } = await buildIllustratePayload(ctx, idNum, mes, s, null);
 
-      const cleanedFloor = cleanFloorForDistill(mes.mes, true) || mes.mes;
-      const recentContext = recentLines.join('\n');
-      const [wStr, hStr] = (s.ratio || '1024x1536').split('x');
-      const charName = mes.name || getActiveCharName();
-      const lore = await collectWorldContext(ctx, idNum, mes, cleanedFloor, recentContext, s, mes.mes);
-
-      const reqEngine = VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'noctq_v1';
-
-      const startResp = await fetch(`${targetUrl}/api/st/illustrate/start`, {
-        method: 'POST',
-        headers: buildHeaders(s),
-        body: JSON.stringify({
-          floor_text: cleanedFloor,
-          recent_context: recentContext,
-          char_name: charName,
-          char_appearance: '',
-          style_prefix: (s.stylePrefix || '').trim(),
-          world_mode: true,
-          world_context: '',
-          memory_context: lore.memoryContext,
-          prev_visual_prompt: lore.prevVisualPrompt,
-          matched_characters: '',
-          user_name: lore.userName,
-          user_appearance: lore.userAppearance,
-          prompt_mode: s.promptMode || 'auto_or_tag',
-          engine: reqEngine,
-          rating_mode: s.ratingMode || 'unrestricted',
-          width: parseInt(wStr, 10) || 1024,
-          height: parseInt(hStr, 10) || 1536,
-          steps: 0,
-          cfg: 0,
-          face_detailer: s.faceDetailer !== false,
-          hand_detailer: s.handDetailer !== false,
-          hires_fix: !!s.hiresFix,
-          return_base64: true,
-          image_format: 'webp',
-        }),
+      const execRes = await executeIllustrateRequest({
+        targetUrl,
+        settings: s,
+        payload,
+        charName,
+        onProgress: (msg, pct) => {
+          if (mesEl) setFloorStatus(mesEl, msg, pct);
+          setGlobalProgress(msg, pct, showFloat);
+        },
       });
-      if (!startResp.ok) {
-        const errBody = await startResp.text().catch(() => '');
-        throw new Error(formatHttpErr(startResp.status, '启动生图任务', errBody));
-      }
-      const { job_id } = await startResp.json();
 
-      // Poll job state cleanly (tolerates up to 4 transient mobile/Cloudflare blips & 15 min total for auto-wake)
-      let jobData = null;
-      let transientErrors = 0;
-      const deadline = Date.now() + 900000;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 1100));
-        let jr;
-        try {
-          jr = await fetch(`${targetUrl}/api/jobs/${job_id}`, {
-            method: 'GET',
-            headers: buildHeaders(s),
-          });
-        } catch (netErr) {
-          transientErrors += 1;
-          if (transientErrors > 3) {
-            throw new Error(`查询生图进度中断：${netErr?.message || '网络连接断开'}`);
-          }
-          await new Promise((r) => setTimeout(r, 1200));
-          continue;
-        }
-        if (!jr.ok) {
-          if (jr.status === 502 || jr.status === 503 || jr.status === 504) {
-            transientErrors += 1;
-            if (transientErrors <= 3) {
-              await new Promise((r) => setTimeout(r, 1200));
-              continue;
-            }
-          }
-          const errBody = await jr.text().catch(() => '');
-          throw new Error(formatHttpErr(jr.status, '查询生图进度', errBody));
-        }
-        transientErrors = 0;
-        jobData = await jr.json();
-
-        if (jobData.status === 'done') break;
-        if (jobData.status === 'error') throw new Error(jobData.error || '服务端渲染出错');
-        if (jobData.status === 'cancelled') throw new Error('生成已中断');
-
-        let pct = 15;
-        let msg = jobData.status_message || '处理中…';
-        if (jobData.status === 'distilling') pct = 18;
-        else if (jobData.status === 'preparing') pct = 28;
-        else if (jobData.status === 'running') {
-          const stepPct = jobData.max_steps ? (jobData.step / jobData.max_steps) * 60 : 10;
-          pct = 30 + stepPct;
-          if (jobData.max_steps) {
-            msg = `${jobData.node_title || '绘制中'} (${jobData.step}/${jobData.max_steps})`;
-          }
-        } else if (jobData.status === 'saving') {
-          pct = 93;
-        }
-        if (mesEl) setFloorStatus(mesEl, msg, pct);
-        setGlobalProgress(msg, pct, showFloat);
-      }
-
-      if (!jobData || jobData.status !== 'done') {
-        throw new Error('生成超时（超过 12 分钟未完成），请检查服务端状态或切到更快的引擎');
-      }
-
-      const res = jobData.extra_result || {};
-      if (res.skipped) {
+      if (execRes.skipped) {
         if (isManual) toastInfo('当前设置仅识别 [IMG] 标签，本楼层未包含该标签', 'info');
         return;
       }
-      if (!res.image_base64) {
-        throw new Error('未收到图像数据');
-      }
 
-      if (mesEl) setFloorStatus(mesEl, '正在保存到酒馆楼层…', 97);
-      setGlobalProgress('正在保存到酒馆楼层…', 97, showFloat);
-      const savedPath = await uploadImageToSillyTavern(
-        res.image_base64,
-        res.image_format || 'webp',
-        charName,
-      );
-      await attachImageToFloor(idNum, savedPath, res.positive, res.negative);
+      const res = execRes.res || {};
+      await attachImageToFloor(idNum, execRes.savedPath, res.positive, res.negative, {
+        ...metaSeed,
+        engine: res.engine || metaSeed.engine,
+        chinesePrompt: res.chinese_prompt || '',
+        seed: Number(res.seed) > 0 ? Number(res.seed) : metaSeed.seed,
+      });
       if (isManual) toastInfo(`插画已生成 (${res.elapsed || ''}s)`, 'success');
     } catch (err) {
       console.error('[yiyi-st]', err);
@@ -1853,7 +3715,9 @@
     } finally {
       runningFloorIds.delete(idNum);
       if (mesEl) removeFloorStatus(mesEl);
-      clearGlobalProgress();
+      if (runningFloorIds.size === 0 && activeRegenTasks.size === 0) {
+        clearGlobalProgress();
+      }
       resolveStudioUrl().catch(() => {});
     }
   }
@@ -1881,7 +3745,10 @@
   function injectAllVisibleFloorButtons() {
     document.querySelectorAll('#chat .mes[mesid]').forEach((el) => {
       const id = el.getAttribute('mesid');
-      if (id !== null) injectFloorButton(id);
+      if (id !== null) {
+        injectFloorButton(id);
+        enhanceFloorMediaCards(id);
+      }
     });
   }
 
@@ -2338,7 +4205,7 @@
             <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
             <button type="button" class="yiyi-close-btn" id="yiyi-btn-test" title="刷新云端状态" style="flex-shrink:0">↻</button>
           </div>
-          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">👑 Qwen-Image-2.1 Noct-Q V4 · 原生中文直出</div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">正在读取可用云端生图引擎…</div>
         </div>
 
         <label class="yiyi-switch-row">
@@ -2348,6 +4215,12 @@
 
         <button class="yiyi-btn yiyi-btn-primary" id="yiyi-btn-draw-last">🖌️ 为最新楼层立即画一张</button>
 
+        <div class="yiyi-field" id="yiyi-engine-field">
+          <label>云端生图引擎</label>
+          <select id="yiyi-opt-engine"></select>
+          <div class="yiyi-hint" id="yiyi-engine-desc" style="display:none"></div>
+        </div>
+
         <div class="yiyi-field">
           <label>默认画幅（单步原生高清）</label>
           <select id="yiyi-opt-ratio">
@@ -2356,6 +4229,17 @@
             <option value="1280x1280">方图 1280×1280</option>
             <option value="896x1344">极速竖图 896×1344</option>
           </select>
+        </div>
+
+        <div class="yiyi-toggle-grid">
+          <label class="yiyi-toggle-chip" title="启用 ScaleROPE 1.5× 印刷级二阶段超分精修（耗时较长）">
+            <input type="checkbox" id="yiyi-opt-hires-refine" />
+            <span>✨ 1.5× 超分精修</span>
+          </label>
+          <label class="yiyi-toggle-chip" title="叠挂 MOSS 无审查成人细节 LoRA（默认已无审查，显式特化按需开启）">
+            <input type="checkbox" id="yiyi-opt-nsfw-boost" />
+            <span>🔥 成人细节增强</span>
+          </label>
         </div>
 
         <div class="yiyi-cloud-actions">
@@ -2424,7 +4308,8 @@
         <div class="yiyi-ov-actions">
           <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-prev" title="上一张">◀</button>
           <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-next" title="下一张">▶</button>
-          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-redraw" title="重画这一层">🔄</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-redraw" title="使用新种子原地重画当前图">🔄</button>
+          <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-delete" title="删除当前插画">🗑️</button>
           <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-zoom" title="大图放大">🔍</button>
           <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-collapse" title="折叠/展开">—</button>
           <button type="button" class="yiyi-ov-icon-btn" id="yiyi-ov-close" title="收起画框">✕</button>
@@ -2448,7 +4333,20 @@
     lightbox.className = 'yiyi-hidden';
     lightbox.innerHTML = `
       <button type="button" class="yiyi-lb-close" id="yiyi-lb-close" title="关闭大图">✕</button>
-      <img id="yiyi-lb-img" alt="插画预览" />
+      <div class="yiyi-lb-stage" id="yiyi-lb-stage">
+        <img id="yiyi-lb-img" alt="插画预览" />
+      </div>
+      <div class="yiyi-lb-bar" id="yiyi-lb-bar">
+        <div class="yiyi-lb-nav-group">
+          <button type="button" class="yiyi-img-action-btn is-icon-only" id="yiyi-lb-prev" title="上一张 (←)">◀</button>
+          <button type="button" class="yiyi-img-action-btn is-icon-only" id="yiyi-lb-next" title="下一张 (→)">▶</button>
+        </div>
+        <span class="yiyi-lb-meta" id="yiyi-lb-meta">插画大图预览</span>
+        <div class="yiyi-lb-act-group">
+          <button type="button" class="yiyi-img-action-btn is-regen" id="yiyi-lb-regen" title="使用新种子重新生成">🔄 重新生成</button>
+          <button type="button" class="yiyi-img-action-btn is-danger" id="yiyi-lb-delete" title="删除此插画">🗑️ 删除</button>
+        </div>
+      </div>
     `;
 
     document.body.append(fab, panel, floatProg, viewer, lightbox);
@@ -2591,24 +4489,45 @@
     const ovPrev = document.getElementById('yiyi-ov-prev');
     const ovNext = document.getElementById('yiyi-ov-next');
     const ovRedraw = document.getElementById('yiyi-ov-redraw');
+    const ovDelete = document.getElementById('yiyi-ov-delete');
     const ovZoom = document.getElementById('yiyi-ov-zoom');
     const ovCollapse = document.getElementById('yiyi-ov-collapse');
     const ovClose = document.getElementById('yiyi-ov-close');
     const ovDrawLast = document.getElementById('yiyi-ov-draw-last');
     const lbClose = document.getElementById('yiyi-lb-close');
+    const lbPrev = document.getElementById('yiyi-lb-prev');
+    const lbNext = document.getElementById('yiyi-lb-next');
+    const lbRegen = document.getElementById('yiyi-lb-regen');
+    const lbDelete = document.getElementById('yiyi-lb-delete');
 
     if (ovPrev) ovPrev.onclick = () => stepOverlay(-1);
     if (ovNext) ovNext.onclick = () => stepOverlay(1);
     if (ovRedraw) {
       ovRedraw.onclick = () => {
-        const mid = ovRedraw.dataset?.mesId;
-        if (mid !== '' && mid !== undefined) illustrateFloor(Number(mid), true);
-        else drawLatestFloor();
+        const cur = document.getElementById('yiyi-ov-stage')?._yiyiCurrentItem;
+        if (cur) {
+          regenerateImage(cur.mesId, cur);
+        } else {
+          drawLatestFloor();
+        }
       };
+    }
+    if (ovDelete) {
+      armDeleteConfirmButton(ovDelete, {
+        normalLabel: '🗑️',
+        confirmLabel: '确认?',
+        normalTitle: '删除当前插画',
+        onConfirm: () => {
+          const cur = document.getElementById('yiyi-ov-stage')?._yiyiCurrentItem;
+          if (cur) return removeImageFromFloor(cur.mesId, cur);
+        },
+      });
     }
     if (ovZoom) {
       ovZoom.onclick = () => {
-        if (ovZoom.dataset?.url) openLightbox(ovZoom.dataset.url);
+        const cur = document.getElementById('yiyi-ov-stage')?._yiyiCurrentItem;
+        if (cur) openLightbox(cur);
+        else if (ovZoom.dataset?.url) openLightbox(ovZoom.dataset.url);
       };
     }
     if (ovCollapse) {
@@ -2622,12 +4541,39 @@
     if (ovClose) ovClose.onclick = hideOverlayViewer;
     if (ovDrawLast) ovDrawLast.onclick = drawLatestFloor;
     if (lbClose) lbClose.onclick = closeLightbox;
+    if (lbPrev) lbPrev.onclick = (e) => { e.stopPropagation(); stepLightbox(-1); };
+    if (lbNext) lbNext.onclick = (e) => { e.stopPropagation(); stepLightbox(1); };
+    if (lbRegen) {
+      lbRegen.onclick = (e) => {
+        e.stopPropagation();
+        if (lightboxTarget && lightboxTarget.mesId !== undefined) {
+          regenerateImage(lightboxTarget.mesId, lightboxTarget);
+        }
+      };
+    }
+    if (lbDelete) {
+      armDeleteConfirmButton(lbDelete, {
+        normalLabel: '🗑️ 删除',
+        confirmLabel: '确认删除？',
+        normalTitle: '删除此插画',
+        onConfirm: () => {
+          if (lightboxTarget && lightboxTarget.mesId !== undefined) {
+            return removeImageFromFloor(lightboxTarget.mesId, lightboxTarget);
+          }
+        },
+      });
+    }
     lightbox.addEventListener('click', (e) => {
       if (e.target === lightbox) closeLightbox();
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !lightbox.classList.contains('yiyi-hidden')) {
+      if (lightbox.classList.contains('yiyi-hidden')) return;
+      if (e.key === 'Escape') {
         closeLightbox();
+      } else if (e.key === 'ArrowLeft') {
+        stepLightbox(-1);
+      } else if (e.key === 'ArrowRight') {
+        stepLightbox(1);
       }
     });
     document.addEventListener('toggle', (e) => {
@@ -2641,14 +4587,25 @@
       el.addEventListener('change', () => {
         const st = getSettings();
         st[key] = isCheck ? !!el.checked : el.value;
+        if (key === 'engine') {
+          st.engineUserChosen = true;
+        }
         saveSettings();
         updateConnectionUi();
+        if (key === 'engine') {
+          syncEngineSelectorUi();
+          enhanceAllVisibleFloorMedia();
+          if (!viewer.classList.contains('yiyi-hidden')) renderOverlayViewer();
+          if (!lightbox.classList.contains('yiyi-hidden')) renderLightbox();
+        }
         if (refreshConn) resolveStudioUrl().catch(() => {});
       });
     };
 
     bindVal('yiyi-opt-enabled', 'enabled', true);
     bindVal('yiyi-opt-engine', 'engine');
+    bindVal('yiyi-opt-hires-refine', 'hiresRefine', true);
+    bindVal('yiyi-opt-nsfw-boost', 'nsfwBoost', true);
     bindVal('yiyi-opt-rating', 'ratingMode');
     bindVal('yiyi-opt-prompt-mode', 'promptMode');
     bindVal('yiyi-opt-ratio', 'ratio');
@@ -2663,6 +4620,7 @@
     bindVal('yiyi-opt-mac-url', 'macUrl', false, true);
     bindVal('yiyi-opt-token', 'token', false, true);
 
+    syncEngineSelectorUi();
     syncPanelFromSettings();
     updateGalleryBadge();
     refreshUpdateUi();
@@ -2680,8 +4638,11 @@
       if (isCheck) el.checked = !!v;
       else el.value = v ?? '';
     };
+    syncEngineSelectorUi();
     setVal('yiyi-opt-enabled', s.enabled, true);
-    setVal('yiyi-opt-engine', VALID_CLOUD_ENGINES.has(s.engine) ? s.engine : 'qwen_omni');
+    setVal('yiyi-opt-engine', resolveActiveEngine(s));
+    setVal('yiyi-opt-hires-refine', s.hiresRefine, true);
+    setVal('yiyi-opt-nsfw-boost', s.nsfwBoost, true);
     setVal('yiyi-opt-rating', s.ratingMode);
     setVal('yiyi-opt-prompt-mode', s.promptMode);
     setVal('yiyi-opt-ratio', s.ratio);
@@ -2706,6 +4667,8 @@
     if (eventTypes.APP_READY) {
       eventSource.on(eventTypes.APP_READY, () => {
         ensureFreshCss();
+        ensureChatMediaObserver();
+        injectAllVisibleFloorButtons();
         promoteHudAbovePopovers();
         scheduleResponsiveLayout();
       });
@@ -2730,6 +4693,7 @@
     eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, (mesId) => {
       const idNum = Number(mesId);
       injectFloorButton(idNum);
+      enhanceFloorMediaCards(idNum);
       const s = getSettings();
       if (s.enabled && pendingAutoIds.has(idNum)) {
         pendingAutoIds.delete(idNum);
@@ -2737,9 +4701,44 @@
       }
     });
 
+    if (eventTypes.MESSAGE_UPDATED) {
+      eventSource.on(eventTypes.MESSAGE_UPDATED, (mesId) => {
+        const idNum = Number(mesId);
+        injectFloorButton(idNum);
+        scheduleFloorMediaEnhance(idNum);
+        updateGalleryBadge();
+      });
+    }
+
+    if (eventTypes.MESSAGE_SWIPED) {
+      eventSource.on(eventTypes.MESSAGE_SWIPED, (mesId) => {
+        const idNum = Number(mesId);
+        // Cancel any active regeneration targeting this floor so it never writes into the new swipe
+        for (const task of Array.from(activeRegenTasks.values())) {
+          if (Number(task.mesId) === idNum) {
+            cancelRegenTask(task.key, { silent: true });
+          }
+        }
+        setTimeout(() => {
+          injectFloorButton(idNum);
+          enhanceFloorMediaCards(idNum);
+          updateGalleryBadge();
+          const viewer = document.getElementById('yiyi-overlay-viewer');
+          if (viewer && !viewer.classList.contains('yiyi-hidden')) {
+            renderOverlayViewer();
+          }
+        }, 60);
+      });
+    }
+
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
       pendingAutoIds.clear();
+      for (const task of Array.from(activeRegenTasks.values())) {
+        cancelRegenTask(task.key, { silent: true, skipServerInterrupt: true });
+      }
+      closeLightbox();
       setTimeout(() => {
+        ensureChatMediaObserver();
         injectAllVisibleFloorButtons();
         syncPanelFromSettings();
         updateGalleryBadge();
@@ -2771,7 +4770,8 @@
       !prevMacNorm ||
       prevMacNorm === '/yiyi-mac' ||
       existingRaw.backendPolicy !== 'mac' ||
-      !VALID_CLOUD_ENGINES.has(existingRaw.engine)
+      LEGACY_REMOVED_ENGINES.has(existingRaw.engine) ||
+      (existingRaw.engine === 'qwen_omni' && !existingRaw.engineUserChosen)
     );
     getSettings();
     if (shouldPersistMigration) {
@@ -2779,12 +4779,62 @@
     }
     buildFloatingUi();
     registerEvents();
+    ensureChatMediaObserver();
     injectAllVisibleFloorButtons();
     updateGalleryBadge();
     promoteHudAbovePopovers();
     setTimeout(promoteHudAbovePopovers, 800);
     setTimeout(() => checkExtensionUpdate({ silent: true }).catch(() => {}), 2000);
     resolveStudioUrl().catch(() => {});
+  }
+
+  if (typeof globalThis !== 'undefined' && globalThis.__YIYI_ST_TEST_HOOK__) {
+    globalThis.__YIYI_ST_TEST_API__ = {
+      getSettings,
+      syncEnginesFromPing,
+      resolveActiveEngine,
+      getDefaultEngine,
+      getEngineDisplayLabel,
+      getEngineShortLabel,
+      normalizeMediaUrl,
+      generateFreshSeed,
+      buildMediaEntry,
+      findMediaIndex,
+      syncSwipeExtraMedia,
+      removeInlineImageFromMesText,
+      isUrlReferencedInChat,
+      deleteOrphanImageFromSillyTavern,
+      persistChat,
+      collectChatIllustrations,
+      armDeleteConfirmButton,
+      resetDeleteConfirmButton,
+      resetAllDeleteConfirms,
+      syncFloorMediaDom,
+      enhanceFloorMediaCards,
+      removeImageFromFloor,
+      attachImageToFloor,
+      buildIllustratePayload,
+      regenerateImage,
+      cancelRegenTask,
+      illustrateFloor,
+      openLightbox,
+      closeLightbox,
+      stepLightbox,
+      renderLightbox,
+      showOverlayViewer,
+      hideOverlayViewer,
+      renderOverlayViewer,
+      init,
+      _state: {
+        getRuntimeEngines: () => runtimeCloudEngines.slice(),
+        getActiveRegenTasks: () => activeRegenTasks,
+        getLightboxTarget: () => lightboxTarget,
+      },
+    };
+  }
+
+  if (typeof globalThis !== 'undefined' && globalThis.__YIYI_ST_TEST_NO_AUTO_INIT__) {
+    return;
   }
 
   if (document.readyState === 'loading') {
