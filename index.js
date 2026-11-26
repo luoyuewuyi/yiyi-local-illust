@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '2.1.0';
+  const EXT_VERSION = '2.2.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -13,46 +13,47 @@
 
   const DEFAULT_CLOUD_ENGINES = [
     {
-      id: 'moss_anime',
-      label: '✨ MOSS 二次元无审查旗舰（默认推荐）',
-      short: 'MOSS二次元',
-      desc: 'Heal BF16 + Anime 0.65 · 28步无审查旗舰',
+      id: 'moss_quality',
+      label: '🎨 画质拉满',
+      short: '画质拉满',
+      sub: 'BF16 旗舰 · ~80–100s',
+      desc: 'MOSS-Image BF16 无审查旗舰（28步，画质与细节拉满，约 80–100s）',
       isDefault: true,
     },
     {
-      id: 'moss_turbo',
-      label: '⚡ MOSS 酒馆极速无审查（18–26s）',
-      short: 'MOSS极速',
-      desc: 'SFT INT8 + OPD 12步 · 高频跑团首选',
-      isDefault: false,
-    },
-    {
-      id: 'moss_drama',
-      label: '🎭 MOSS 剧情双人 / 精准汉字旗舰',
-      short: 'MOSS剧情',
-      desc: 'SFT BF16 + SLG 28步 · 多人/汉字零翻车',
-      isDefault: false,
-    },
-    {
-      id: 'qwen_omni',
-      label: '👑 Qwen-Image-2.1 Noct-Q V4（兼容备用）',
-      short: 'Qwen',
-      desc: '原有原生中文单步引擎（向后兼容）',
+      id: 'moss_fast',
+      label: '⚡ 快速出图',
+      short: '快速出图',
+      sub: '12步极速 · ~18–26s',
+      desc: 'MOSS-Image 12 步极速无审查（高频跑团首选，约 18–26s）',
       isDefault: false,
     },
   ];
 
   const ENGINE_FRIENDLY_META = {
-    moss_anime: { label: '✨ MOSS 二次元无审查旗舰（默认推荐）', short: 'MOSS二次元' },
-    moss_turbo: { label: '⚡ MOSS 酒馆极速无审查（18–26s）', short: 'MOSS极速' },
-    moss_drama: { label: '🎭 MOSS 剧情双人 / 精准汉字旗舰', short: 'MOSS剧情' },
-    qwen_omni: { label: '👑 Qwen-Image-2.1 Noct-Q V4（兼容备用）', short: 'Qwen' },
-    moss_image: { label: '✨ MOSS-Image 顶配无审查', short: 'MOSS' },
-    moss_image_sft: { label: '✨ MOSS-Image SFT（顶配无审查）', short: 'MOSS-SFT' },
-    moss_image_base: { label: '✨ MOSS-Image Base（无审查）', short: 'MOSS-Base' },
+    moss_quality: {
+      label: '🎨 画质拉满',
+      short: '画质拉满',
+      sub: 'BF16 旗舰 · ~80–100s',
+      desc: 'MOSS-Image BF16 无审查旗舰（28步，画质与细节拉满，约 80–100s）',
+    },
+    moss_fast: {
+      label: '⚡ 快速出图',
+      short: '快速出图',
+      sub: '12步极速 · ~18–26s',
+      desc: 'MOSS-Image 12 步极速无审查（高频跑团首选，约 18–26s）',
+    },
   };
 
-  const LEGACY_REMOVED_ENGINES = new Set([
+  // Silent migration sets for historical persisted settings (never exposed in UI)
+  const LEGACY_FAST_ENGINES = new Set(['moss_turbo']);
+  const LEGACY_QUALITY_ENGINES = new Set([
+    'moss_anime',
+    'moss_drama',
+    'moss_image',
+    'moss_image_sft',
+    'moss_image_base',
+    'qwen_omni',
     'noctq_v1',
     'anima_noct',
     'rouwei_vpred',
@@ -75,7 +76,7 @@
     remoteUrl: '',
     macUrl: DEFAULT_MAC_HTTPS_URL,
     token: '',
-    engine: 'moss_anime',
+    engine: 'moss_quality',
     engineUserChosen: false,
     hiresRefine: false,
     nsfwBoost: false,
@@ -133,16 +134,32 @@
 
   function getDefaultEngine() {
     const def = runtimeCloudEngines.find((e) => e.isDefault);
-    return def?.id || runtimeCloudEngines[0]?.id || 'moss_anime';
+    return def?.id || runtimeCloudEngines[0]?.id || 'moss_quality';
+  }
+
+  function migrateEngineId(rawEngine) {
+    const raw = String(rawEngine || '').trim();
+    if (!raw) return getDefaultEngine();
+    if (VALID_CLOUD_ENGINES.has(raw)) return raw;
+    if (LEGACY_FAST_ENGINES.has(raw)) {
+      return VALID_CLOUD_ENGINES.has('moss_fast') ? 'moss_fast' : getDefaultEngine();
+    }
+    if (LEGACY_QUALITY_ENGINES.has(raw)) {
+      return VALID_CLOUD_ENGINES.has('moss_quality') ? 'moss_quality' : getDefaultEngine();
+    }
+    return getDefaultEngine();
   }
 
   function resolveActiveEngine(settings) {
-    const raw = String(settings?.engine || '').trim();
-    if (raw && VALID_CLOUD_ENGINES.has(raw)) return raw;
-    if (raw && !enginesSyncedFromServer && !LEGACY_REMOVED_ENGINES.has(raw)) {
-      return raw;
-    }
-    return getDefaultEngine();
+    return migrateEngineId(settings?.engine);
+  }
+
+  function formatModeButtonLabel(label, id) {
+    const clean = String(label || '')
+      .replace(/\s*MOSS(?:-Image)?\s*[·•\-—:]\s*/i, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    return clean || ENGINE_FRIENDLY_META[id]?.label || id;
   }
 
   function getEngineDisplayLabel(engineId) {
@@ -151,7 +168,9 @@
     const found = runtimeCloudEngines.find((e) => e.id === id);
     if (found?.label) return found.label;
     if (ENGINE_FRIENDLY_META[id]?.label) return ENGINE_FRIENDLY_META[id].label;
-    return id;
+    const migrated = migrateEngineId(id);
+    const migSpec = runtimeCloudEngines.find((e) => e.id === migrated) || ENGINE_FRIENDLY_META[migrated];
+    return migSpec?.label || id;
   }
 
   function getEngineShortLabel(engineId) {
@@ -160,7 +179,9 @@
     const found = runtimeCloudEngines.find((e) => e.id === id);
     if (found?.short) return found.short;
     if (ENGINE_FRIENDLY_META[id]?.short) return ENGINE_FRIENDLY_META[id].short;
-    if (found?.label) return found.label.replace(/^[^\w\u4e00-\u9fa5]+/, '').slice(0, 10);
+    if (LEGACY_FAST_ENGINES.has(id)) return ENGINE_FRIENDLY_META.moss_fast.short;
+    if (LEGACY_QUALITY_ENGINES.has(id)) return ENGINE_FRIENDLY_META.moss_quality.short;
+    if (found?.label) return formatModeButtonLabel(found.label, id).replace(/^[^\w\u4e00-\u9fa5]+/, '').slice(0, 10);
     return id.slice(0, 10);
   }
 
@@ -173,6 +194,8 @@
         id,
         label: preset?.label || id,
         short: preset?.short || id.slice(0, 10),
+        sub: preset?.sub || '',
+        desc: preset?.desc || '',
         isDefault: idx === 0,
       };
     }
@@ -181,36 +204,73 @@
     if (!id) return null;
     const preset = ENGINE_FRIENDLY_META[id];
     const label = String(entry.label || entry.name || entry.title || preset?.label || id).trim();
-    const short = String(entry.short || entry.badge || preset?.short || label.replace(/^[^\w\u4e00-\u9fa5]+/, '').slice(0, 10)).trim();
+    const short = String(
+      entry.short || entry.badge || preset?.short || formatModeButtonLabel(label, id).replace(/^[^\w\u4e00-\u9fa5]+/, '').slice(0, 10),
+    ).trim();
+    const stepsNum = Number(entry.steps);
+    const sub = String(entry.sub || entry.subtitle || entry.speed || preset?.sub || (stepsNum > 0 ? `${stepsNum}步` : '')).trim();
+    const desc = String(entry.desc || entry.description || preset?.desc || '').trim();
     return {
       id,
       label,
       short,
+      sub,
+      desc,
       isDefault: !!(entry.default || entry.is_default),
     };
   }
 
+  function selectCloudEngine(engineId) {
+    const nextId = migrateEngineId(engineId);
+    const st = getSettings();
+    const changed = st.engine !== nextId || !st.engineUserChosen;
+    st.engine = nextId;
+    st.engineUserChosen = true;
+    if (changed) saveSettings();
+    syncEngineSelectorUi();
+    updateConnectionUi();
+    enhanceAllVisibleFloorMedia();
+    const viewer = document.getElementById('yiyi-overlay-viewer');
+    if (viewer && !viewer.classList.contains('yiyi-hidden')) renderOverlayViewer();
+    const lb = document.getElementById('yiyi-lightbox');
+    if (lb && !lb.classList.contains('yiyi-hidden')) renderLightbox();
+    return nextId;
+  }
+
   function syncEngineSelectorUi() {
     const field = document.getElementById('yiyi-engine-field');
-    const sel = document.getElementById('yiyi-opt-engine');
+    const seg = document.getElementById('yiyi-opt-engine');
     const descEl = document.getElementById('yiyi-engine-desc');
-    if (!sel) return;
+    if (!seg) return;
     const s = getSettings();
     const curVal = resolveActiveEngine(s);
-    sel.innerHTML = '';
+    seg.innerHTML = '';
+    seg.dataset.value = curVal;
     for (const eng of runtimeCloudEngines) {
-      const opt = document.createElement('option');
-      opt.value = eng.id;
-      opt.textContent = eng.label;
-      sel.appendChild(opt);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isActive = eng.id === curVal;
+      btn.className = `yiyi-mode-btn${eng.id === 'moss_fast' ? ' is-fast' : ''}${isActive ? ' is-active' : ''}`;
+      btn.setAttribute('role', 'radio');
+      btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+      btn.dataset.engine = eng.id;
+      btn.title = eng.desc ? `${eng.label} — ${eng.desc}` : eng.label;
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'yiyi-mode-title';
+      titleSpan.textContent = formatModeButtonLabel(eng.label, eng.id);
+      btn.appendChild(titleSpan);
+
+      if (eng.sub) {
+        const subSpan = document.createElement('span');
+        subSpan.className = 'yiyi-mode-sub';
+        subSpan.textContent = eng.sub;
+        btn.appendChild(subSpan);
+      }
+
+      btn.onclick = () => selectCloudEngine(eng.id);
+      seg.appendChild(btn);
     }
-    if (!runtimeCloudEngines.some((e) => e.id === curVal) && curVal) {
-      const opt = document.createElement('option');
-      opt.value = curVal;
-      opt.textContent = getEngineDisplayLabel(curVal);
-      sel.appendChild(opt);
-    }
-    sel.value = curVal;
     if (descEl) {
       const activeSpec = runtimeCloudEngines.find((e) => e.id === curVal);
       const desc = activeSpec?.desc ? String(activeSpec.desc).trim() : '';
@@ -252,7 +312,6 @@
         if (Number(meta.cfg) > 0) spec.cfg = Number(meta.cfg);
       }
       seen.add(spec.id);
-      if (defaultId && spec.id === defaultId) spec.isDefault = true;
       parsed.push(spec);
     };
 
@@ -271,7 +330,9 @@
 
     if (!parsed.length) return false;
 
-    if (!parsed.some((e) => e.isDefault)) {
+    if (defaultId && parsed.some((e) => e.id === defaultId)) {
+      parsed.forEach((e) => { e.isDefault = e.id === defaultId; });
+    } else if (!parsed.some((e) => e.isDefault)) {
       parsed[0].isDefault = true;
     }
 
@@ -280,9 +341,11 @@
     VALID_CLOUD_ENGINES.clear();
     for (const e of runtimeCloudEngines) VALID_CLOUD_ENGINES.add(e.id);
 
+    const rawBefore = String(getCtx()?.extensionSettings?.[EXT_KEY]?.engine || '').trim();
     const s = getSettings();
-    if (!VALID_CLOUD_ENGINES.has(s.engine)) {
-      s.engine = getDefaultEngine();
+    const migrated = migrateEngineId(s.engine);
+    if (s.engine !== migrated || (rawBefore && rawBefore !== migrated)) {
+      s.engine = migrated;
       saveSettings();
     }
     syncEngineSelectorUi();
@@ -307,16 +370,7 @@
       merged.macUrl = DEFAULT_MAC_HTTPS_URL;
     }
     const rawEngine = typeof raw.engine === 'string' ? raw.engine.trim() : '';
-    if (!rawEngine || LEGACY_REMOVED_ENGINES.has(rawEngine)) {
-      merged.engine = getDefaultEngine();
-    } else if (rawEngine === 'qwen_omni' && !raw.engineUserChosen && VALID_CLOUD_ENGINES.has('moss_anime')) {
-      // Smoothly upgrade v2.0.1 single-engine users to the new default MOSS flagship unless they manually chose qwen_omni
-      merged.engine = getDefaultEngine();
-    } else if (enginesSyncedFromServer && !VALID_CLOUD_ENGINES.has(rawEngine)) {
-      merged.engine = getDefaultEngine();
-    } else {
-      merged.engine = rawEngine;
-    }
+    merged.engine = migrateEngineId(rawEngine);
     merged.hiresRefine = !!merged.hiresRefine;
     merged.nsfwBoost = !!merged.nsfwBoost;
     if (raw.handDetailer === undefined) {
@@ -1422,7 +1476,7 @@
           ? '🎨 当前可以生图（正在排队绘制中）'
           : `🟢 当前可以生图 · L4${llmTag} 就绪`;
         const curEngShort = getEngineShortLabel(resolveActiveEngine(s));
-        const engNote = curEngShort ? ` · 引擎 ${curEngShort}` : '';
+        const engNote = curEngShort ? ` · MOSS ${curEngShort}` : '';
         const scheduleStr = typeof info.schedule === 'string' && info.schedule.trim() ? info.schedule.trim() : '';
         const alwaysOnSeg = scheduleStr ? scheduleStr.split(/[·•]/)[0].trim() : '07:00–02:00 全天常驻零等待';
         const modeNote = idleRemMin !== null
@@ -1432,7 +1486,7 @@
       } else if (activeEndpointMode === 'booting') {
         banner.classList.add('is-booting');
         titleEl.textContent = '⏳ 正在自动唤醒云端 L4（约 2.5 分钟）…';
-        subEl.textContent = info.phase || '正在拉起云端显卡与冠军模型，点画图也可直接排队等待就绪';
+        subEl.textContent = info.phase || '正在拉起云端显卡与 MOSS-Image 模型，点画图也可直接排队等待就绪';
       } else if (activeEndpointMode === 'sleeping') {
         banner.classList.add('is-sleeping');
         titleEl.textContent = autoWake
@@ -2195,7 +2249,7 @@
     if (regenBtn) {
       regenBtn.style.display = canMutate ? '' : 'none';
       const curEngLabel = getEngineDisplayLabel(resolveActiveEngine(getSettings()));
-      regenBtn.title = `使用新随机种子重新生成（当前引擎：${curEngLabel}）`;
+      regenBtn.title = `使用新随机种子重新生成（当前档位：${curEngLabel}）`;
     }
     if (delBtn) {
       delBtn.style.display = canMutate ? '' : 'none';
@@ -2337,7 +2391,7 @@
     }
     if (redrawBtn) {
       redrawBtn.dataset.mesId = String(cur.mesId);
-      redrawBtn.title = `原地重画当前插画（当前引擎：${getEngineDisplayLabel(resolveActiveEngine(getSettings()))}）`;
+      redrawBtn.title = `原地重画当前插画（当前档位：${getEngineDisplayLabel(resolveActiveEngine(getSettings()))}）`;
     }
     if (deleteBtn) deleteBtn.disabled = false;
     if (zoomBtn) {
@@ -2780,7 +2834,7 @@
 
       if (regenBtn) {
         const curEngLabel = getEngineDisplayLabel(resolveActiveEngine(getSettings()));
-        regenBtn.title = `使用新种子原地重画（当前引擎：${curEngLabel}）`;
+        regenBtn.title = `使用新种子原地重画（当前档位：${curEngLabel}）`;
         regenBtn.onclick = (e) => {
           e.stopPropagation();
           e.preventDefault();
@@ -3377,7 +3431,7 @@
     }
 
     if (!jobData || jobData.status !== 'done') {
-      throw new Error('生成超时（超过 15 分钟未完成），请检查服务端状态或切到更快的引擎');
+      throw new Error('生成超时（超过 15 分钟未完成），请检查服务端状态或切到「⚡ 快速出图」档位');
     }
 
     const res = jobData.extra_result || {};
@@ -4205,7 +4259,7 @@
             <div id="yiyi-can-draw-title" style="font-weight:700">正在检查云端生图状态…</div>
             <button type="button" class="yiyi-close-btn" id="yiyi-btn-test" title="刷新云端状态" style="flex-shrink:0">↻</button>
           </div>
-          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">正在读取可用云端生图引擎…</div>
+          <div id="yiyi-can-draw-sub" style="font-size:11px;opacity:.88">正在读取 MOSS-Image 云端状态…</div>
         </div>
 
         <label class="yiyi-switch-row">
@@ -4216,8 +4270,8 @@
         <button class="yiyi-btn yiyi-btn-primary" id="yiyi-btn-draw-last">🖌️ 为最新楼层立即画一张</button>
 
         <div class="yiyi-field" id="yiyi-engine-field">
-          <label>云端生图引擎</label>
-          <select id="yiyi-opt-engine"></select>
+          <label>MOSS-Image 出图档位</label>
+          <div class="yiyi-mode-segment" id="yiyi-opt-engine" role="radiogroup" aria-label="MOSS-Image 出图档位"></div>
           <div class="yiyi-hint" id="yiyi-engine-desc" style="display:none"></div>
         </div>
 
@@ -4587,23 +4641,13 @@
       el.addEventListener('change', () => {
         const st = getSettings();
         st[key] = isCheck ? !!el.checked : el.value;
-        if (key === 'engine') {
-          st.engineUserChosen = true;
-        }
         saveSettings();
         updateConnectionUi();
-        if (key === 'engine') {
-          syncEngineSelectorUi();
-          enhanceAllVisibleFloorMedia();
-          if (!viewer.classList.contains('yiyi-hidden')) renderOverlayViewer();
-          if (!lightbox.classList.contains('yiyi-hidden')) renderLightbox();
-        }
         if (refreshConn) resolveStudioUrl().catch(() => {});
       });
     };
 
     bindVal('yiyi-opt-enabled', 'enabled', true);
-    bindVal('yiyi-opt-engine', 'engine');
     bindVal('yiyi-opt-hires-refine', 'hiresRefine', true);
     bindVal('yiyi-opt-nsfw-boost', 'nsfwBoost', true);
     bindVal('yiyi-opt-rating', 'ratingMode');
@@ -4640,7 +4684,6 @@
     };
     syncEngineSelectorUi();
     setVal('yiyi-opt-enabled', s.enabled, true);
-    setVal('yiyi-opt-engine', resolveActiveEngine(s));
     setVal('yiyi-opt-hires-refine', s.hiresRefine, true);
     setVal('yiyi-opt-nsfw-boost', s.nsfwBoost, true);
     setVal('yiyi-opt-rating', s.ratingMode);
@@ -4766,12 +4809,14 @@
     const prevMacNorm = typeof existingRaw?.macUrl === 'string'
       ? existingRaw.macUrl.trim().replace(/\/+$/, '')
       : '';
+    const rawEngineStr = typeof existingRaw?.engine === 'string' ? existingRaw.engine.trim() : '';
+    const migratedEngine = migrateEngineId(rawEngineStr);
     const shouldPersistMigration = !!existingRaw && (
       !prevMacNorm ||
       prevMacNorm === '/yiyi-mac' ||
       existingRaw.backendPolicy !== 'mac' ||
-      LEGACY_REMOVED_ENGINES.has(existingRaw.engine) ||
-      (existingRaw.engine === 'qwen_omni' && !existingRaw.engineUserChosen)
+      !rawEngineStr ||
+      rawEngineStr !== migratedEngine
     );
     getSettings();
     if (shouldPersistMigration) {
@@ -4791,6 +4836,8 @@
   if (typeof globalThis !== 'undefined' && globalThis.__YIYI_ST_TEST_HOOK__) {
     globalThis.__YIYI_ST_TEST_API__ = {
       getSettings,
+      migrateEngineId,
+      selectCloudEngine,
       syncEnginesFromPing,
       resolveActiveEngine,
       getDefaultEngine,

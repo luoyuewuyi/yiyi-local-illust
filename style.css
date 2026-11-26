@@ -1,6 +1,6 @@
 /* CSS freshness marker: index.js compares this with EXT_VERSION and cache-busts a stale sheet. */
 :root {
-  --yiyi-css-ver: "2.1.0";
+  --yiyi-css-ver: "2.2.0";
 }
 
 .yiyi-can-draw-banner {
@@ -356,6 +356,69 @@
 .yiyi-field select:focus,
 .yiyi-field textarea:focus {
   border-color: rgba(167, 139, 250, 0.7);
+}
+.yiyi-mode-segment {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border-radius: 11px;
+  background: rgba(9, 12, 24, 0.88);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+.yiyi-mode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 6px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #cbd5e1;
+  cursor: pointer;
+  text-align: center;
+  user-select: none;
+  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
+}
+.yiyi-mode-btn:hover:not(.is-active) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #f8fafc;
+}
+.yiyi-mode-btn:active {
+  transform: scale(0.98);
+}
+.yiyi-mode-btn.is-active {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.34), rgba(168, 85, 247, 0.32), rgba(236, 72, 153, 0.24));
+  border-color: rgba(196, 181, 253, 0.72);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(139, 92, 246, 0.28);
+}
+.yiyi-mode-btn.is-fast.is-active {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.32), rgba(56, 189, 248, 0.24), rgba(251, 191, 36, 0.2));
+  border-color: rgba(125, 211, 252, 0.76);
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(56, 189, 248, 0.26);
+}
+.yiyi-mode-title {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.yiyi-mode-sub {
+  font-size: 10px;
+  line-height: 1.2;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.yiyi-mode-btn.is-active .yiyi-mode-sub {
+  color: rgba(241, 245, 249, 0.88);
 }
 .yiyi-check-row {
   display: flex;
@@ -1039,6 +1102,13 @@
   padding: 7px 9px;
   font-size: 13px;
 }
+#yiyi-st-panel.yiyi-mobile .yiyi-mode-btn {
+  padding: 8px 6px;
+  min-height: 44px;
+}
+#yiyi-st-panel.yiyi-mobile .yiyi-mode-title {
+  font-size: 12.5px;
+}
 #yiyi-st-panel.yiyi-mobile-narrow .yiyi-grid-2 {
   grid-template-columns: 1fr;
 }
@@ -1110,6 +1180,13 @@
   #yiyi-st-panel .yiyi-field textarea {
     padding: 7px 9px;
     font-size: 13px;
+  }
+  #yiyi-st-panel .yiyi-mode-btn {
+    padding: 8px 6px;
+    min-height: 44px;
+  }
+  #yiyi-st-panel .yiyi-mode-title {
+    font-size: 12.5px;
   }
   #yiyi-overlay-viewer {
     max-width: calc(100vw - 16px);
