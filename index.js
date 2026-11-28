@@ -1,6 +1,6 @@
 (() => {
   const EXT_KEY = 'yiyi_local_illust';
-  const EXT_VERSION = '2.2.0';
+  const EXT_VERSION = '2.3.0';
   const EXT_FOLDER_NAME = 'yiyi-local-illust';
   const DEFAULT_MAC_HTTPS_URL = 'https://draw.fzy.asia/yiyi-mac';
   const DEFAULT_MAC_HTTP_URL = 'http://120.2.102.194:8093/yiyi-mac';
@@ -394,6 +394,46 @@
     return ctx.characters?.[ctx.characterId]?.name || ctx.name2 || '';
   }
 
+  function stripPairedBlocks(input, tagPattern) {
+    let out = String(input || '');
+    const re = new RegExp(`<(${tagPattern})\\b[^>]*>(?:(?!<\\1\\b)[\\s\\S])*?<\\/\\1>`, 'gi');
+    for (let pass = 0; pass < 3; pass++) {
+      const next = out.replace(re, '');
+      if (next === out) break;
+      out = next;
+    }
+    return out;
+  }
+
+  function unwrapSafeHtmlTags(input) {
+    return String(input || '')
+      .replace(/<br\s*\/?>|<\/(?:p|div|li|tr|h[1-6]|section|article|blockquote)>/gi, '\n')
+      // Only strip valid ASCII HTML/XML tags so Chinese angle-bracket thoughts ("<不会吧>") or math ("<5米, >10") survive intact.
+      .replace(/<\/?[a-zA-Z][a-zA-Z0-9:_-]*(?:\s+[^<>]{0,400})?\/?>/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function countNarrativeChars(text) {
+    const s = String(text || '').replace(/\s+/g, '');
+    if (!s) return 0;
+    const cjk = (s.match(/[\u4e00-\u9fa5]/g) || []).length;
+    const words = (String(text || '').match(/[A-Za-z]{2,}/g) || []).length;
+    return cjk + words * 3;
+  }
+
+  function looksLikeProseText(text) {
+    const s = String(text || '').trim();
+    if (!s) return false;
+    const lines = s.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (!lines.length) return false;
+    const kvLines = lines.filter((l) => /^["']?[^"'：:=|\n]{1,18}["']?\s*[:：=]\s*/.test(l)).length;
+    if (lines.length >= 2 && kvLines / lines.length >= 0.7 && !/[。！？!?]/.test(s)) {
+      return false;
+    }
+    return countNarrativeChars(s) >= 20;
+  }
+
   function cleanFloorForDistill(raw, keepInlineTag = false) {
     if (!raw) return '';
     const savedTags = [];
@@ -407,21 +447,67 @@
         });
       }
     }
-    s = s
-      .replace(/<(think[a-z0-9_-]*|thinking|thought|cot|reasoning|scratchpad|inner_monologue)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-      .replace(/<(style|script|head|svg|template|noscript|details|UpdateVariable|Variable|variables|statusbar|status|options|choices|mvu|JSONPatch|tableEdit)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-      .replace(/```(?:html|css|js|javascript|json|yaml|yml|mvu|updatevariable|status|statusbar)\b[\s\S]*?```/gi, '')
-      .replace(/<!--[\s\S]*?-->/g, '')
-      .replace(/<br\s*\/?>|<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
-      .replace(/<[^>]+>/g, '')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
-    if (keepInlineTag && savedTags.length) {
-      savedTags.forEach((orig, idx) => {
-        s = s.replace(`__YIYI_IMG_TAG_${idx}__`, orig);
-      });
+
+    const restoreSavedTags = (txt) => {
+      let out = txt;
+      if (keepInlineTag && savedTags.length) {
+        savedTags.forEach((orig, idx) => {
+          out = out.replace(`__YIYI_IMG_TAG_${idx}__`, orig);
+        });
+      }
+      return out.trim();
+    };
+
+    const HARD_NOISE_TAGS = 'think[a-z0-9_-]*|thinking|thought|cot|reasoning|scratchpad|inner_monologue|style|script|head|svg|template|noscript|UpdateVariable|Variable|variables|mvu|JSONPatch|tableEdit';
+    const SOFT_UI_TAGS = 'details|statusbar|status|options|choices';
+
+    // Pass 1 (gentle): remove only unambiguous reasoning/code/variable noise blocks
+    let softBase = stripPairedBlocks(s, HARD_NOISE_TAGS);
+    softBase = softBase
+      .replace(/```(?:css|js|javascript|json|yaml|yml|mvu|updatevariable|status|statusbar)\b[\s\S]*?```/gi, '')
+      .replace(/<!--[\s\S]*?-->/g, '');
+
+    // Pass 2 (strict): also strip collapsible statusbars / choices / html code fences
+    let strictBase = stripPairedBlocks(softBase, SOFT_UI_TAGS)
+      .replace(/```html\b[\s\S]*?```/gi, '');
+
+    let strictCleaned = unwrapSafeHtmlTags(strictBase);
+    // Strip any leftover orphaned thinking/noise opening/closing tags without touching inner text
+    strictCleaned = strictCleaned.replace(/<\/?(?:think[a-z0-9_-]*|thinking|thought|cot|reasoning|scratchpad|inner_monologue|statusbar|UpdateVariable|JSONPatch|tableEdit)\b[^>]*>/gi, '').trim();
+
+    if (strictCleaned.length >= 16) {
+      return restoreSavedTags(strictCleaned);
     }
-    return s.trim();
+
+    // Safety fallback: if strict stripping wiped out prose wrapped inside <details>/```html, degrade gently
+    let softCleaned = stripPairedBlocks(softBase, 'summary')
+      .replace(/```html\b([\s\S]*?)```/gi, '$1');
+    softCleaned = unwrapSafeHtmlTags(softCleaned);
+    softCleaned = softCleaned.replace(/<\/?(?:think[a-z0-9_-]*|thinking|thought|cot|reasoning|scratchpad|inner_monologue|statusbar|UpdateVariable|JSONPatch|tableEdit)\b[^>]*>/gi, '').trim();
+
+    const strictNarr = countNarrativeChars(strictCleaned);
+    const softNarr = countNarrativeChars(softCleaned);
+    if (
+      (!strictCleaned && looksLikeProseText(softCleaned)) ||
+      (strictNarr < 14 && softNarr >= Math.max(48, strictNarr * 4) && looksLikeProseText(softCleaned))
+    ) {
+      return restoreSavedTags(softCleaned);
+    }
+
+    if (strictCleaned) {
+      return restoreSavedTags(strictCleaned);
+    }
+
+    // Last-resort guard against malformed/unclosed tags swallowing a prose-rich floor
+    const rawFallback = unwrapSafeHtmlTags(
+      stripPairedBlocks(s, 'style|script|head|svg|template|noscript')
+        .replace(/<!--[\s\S]*?-->/g, ''),
+    );
+    if (!strictCleaned && !softCleaned && looksLikeProseText(rawFallback) && !/<(?:think|thinking|thought|statusbar|UpdateVariable)\b/i.test(s)) {
+      return restoreSavedTags(rawFallback);
+    }
+
+    return restoreSavedTags(strictCleaned);
   }
 
   function splitLoreKeys(raw) {
@@ -442,190 +528,280 @@
     const minLen = /[\u4e00-\u9fa5]/.test(tl) ? 2 : 3;
     if (tl.length < minLen) return 0;
     if (curLower.includes(tl)) return 3;
-    if (prevLower.includes(tl)) return 1;
+    if (prevLower && prevLower.includes(tl)) return 1;
     return 0;
   }
 
-  const VIS_KEY_RE = /(外貌|长相|容貌|特征|衣着|穿[着戴]|服[装饰]|装扮|裙|裤|发[色型]|瞳[色眸]|眸色|肤色|身[材高体]|配饰|首饰|手持|地点|位置|场景|环境|所在|天气|时间|情绪|心情|状态|伤[势痕]|appearance|look|outfit|cloth|wear|dress|hair|eye|skin|body|location|place|scene|weather|time|state)/i;
   const NOISE_VAR_KEY_RE = /^(?:hp|mp|exp|lv|level|gold|money|coin|credit|score|rank|id|uuid|timestamp|created_at|updated_at|\$meta)$/i;
-  const STORY_VIS_RE = /(?:一袭|身穿|穿着|换上|披着|身披|戴着|系着|赤裸|裸露|未着寸缕|赤身|衣衫|裙摆|长裙|短裙|礼裙|汉服|旗袍|和服|睡衣|内衣|比基尼|校服|白袜|黑丝|丝袜|高跟|发型|长发|短发|双马尾|银发|白发|黑发|金发|粉发|红发|蓝发|紫发|灰发|挑染|瞳色|异瞳|红眸|蓝眸|金眸|紫眸|碧眸|兽耳|狐耳|猫耳|龙角|羽翼|尾巴|面容|肌肤|伤痕|青紫|红晕|身处|位于|站在|坐在|躺在|倚在|走进|来到|城堡|古塔|森林|温泉|海边|雨夜|月光|灯火|露台|宫殿|教室|街头|卧室|silver hair|white hair|black hair|blonde|red eyes|blue eyes|heterochromia|wearing|dressed in|naked|nude)/i;
-  const APPEARANCE_STICKY_RE = /(?:发|瞳|眼|眸|穿着|身穿|换上|一袭|披着|裙|衣|衫|服|饰|耳|角|尾|羽翼|肤|脸|面容|赤裸|未着寸缕|hair|eyes|heterochromia|wearing|dressed|outfit|nude|naked)/i;
 
-  function collectVariableVisualHints(obj, out, depth = 0, prefix = '') {
-    if (!obj || typeof obj !== 'object' || depth > 4 || out.length >= 10) return;
+  // Permanent fixed physical traits (hair color/style, eye color/heterochromia, skin tone, physique, non-human species features, permanent marks)
+  const PERMANENT_KEY_RE = /(外貌|长相|容貌|特征|发[色型]|瞳[色眸]|眸色|眼色|肤色|身[材高体]|体型|种族|物种|形态|兽耳|羽翼|尾巴|泪痣|疤痕|appearance|look|hair|eye|skin|body|race|species|ears|wings|tail|scar)/i;
+  const OUTFIT_KEY_RE = /(衣着|穿着|穿戴|服饰|服装|着装|装扮|衣裙|衣服|鞋袜|配饰|首饰|束缚|outfit|cloth|wear|dress|attire|costume)/i;
+  const SCENE_KEY_RE = /(地点|位置|场景|环境|所在|天气|时间|氛围|location|place|scene|setting|weather|time|environment)/i;
+  const VIS_KEY_RE = new RegExp(`${PERMANENT_KEY_RE.source}|${OUTFIT_KEY_RE.source}|${SCENE_KEY_RE.source}`, 'i');
+
+  const HAIR_TRAIT_RE = /(?:发色|发型|长发|短发|卷发|直发|碎发|齐肩发|及腰长?发|齐腰长?发|披肩长?发|马尾|双马尾|低马尾|高马尾|麻花辫|细辫|编发|丸子头|公主切|姬发式|刘海|挑染|渐变发|银发|银白(?:色)?(?:长|短|卷|直)?发|白发|雪白(?:长|短)?发|黑发|乌黑(?:长|短)?发|漆黑(?:长|短)?发|金发|金黄(?:长|短)?发|粉发|樱粉(?:长|短)?发|红发|绯红(?:长|短)?发|酒红(?:长|短)?发|蓝发|冰蓝(?:长|短)?发|紫发|淡紫(?:长|短)?发|灰发|银灰(?:长|短)?发|棕发|栗色(?:长|短|低|高)?(?:发|马尾)|茶色(?:长|短)?发|亚麻色?(?:长|短)?发|墨绿(?:长|短)?发|(?:银白|雪白|乌黑|金黄|绯红|樱粉|淡紫|浅蓝|深蓝|栗色|棕色|银灰|银|白|黑|金|粉|红|蓝|紫|灰|棕|绿|茶|栗)(?:色)?(?:的)?(?:秀发|头发|发丝)|silver\s+hair|white\s+hair|black\s+hair|blonde|brunette|pink\s+hair|red\s+hair|blue\s+hair|purple\s+hair|brown\s+hair|chestnut\s+hair|ponytail|twintails|braid)/i;
+  const EYE_TRAIT_RE = /(?:瞳色|异瞳|异色双眸|异色瞳|眸色|眼色|虹膜|红瞳|红眸|蓝瞳|蓝眸|金瞳|金眸|紫瞳|紫眸|碧瞳|碧眸|绿瞳|绿眸|黑瞳|黑眸|灰瞳|灰眸|棕瞳|棕眸|绯红(?:色)?(?:眼|眸|瞳)|湛蓝(?:色)?(?:眼|眸|瞳)|宝石(?:红|蓝)(?:色)?(?:眼|眸|瞳)|琥珀(?:色)?(?:眼|眸|瞳)|翡翠(?:色)?(?:眼|眸|瞳)|冰蓝(?:色)?(?:眼|眸|瞳)|紫罗兰(?:色)?(?:眼|眸|瞳)|(?:绯红|湛蓝|浅蓝|深蓝|冰蓝|蔚蓝|翠绿|碧绿|琥珀|金黄|淡紫|深紫|赤红|银灰|茶色|棕色|红|蓝|金|紫|绿|碧|黑|灰|棕)(?:色)?(?:的)?(?:眼睛|眼眸|双眸|瞳孔)|(?:左眼|右眼|双眼|眼眸|双眸|瞳孔)[^，。！？,\n]{0,12}(?:绯红|湛蓝|红宝石|蓝宝石|赤红|血红|宝石蓝|冰蓝|翠绿|碧绿|琥珀|鎏金|金黄|淡紫|深紫|银灰|漆黑|红色|蓝色|金色|紫色|绿色|异色)|heterochromia|(?:red|blue|golden|gold|purple|violet|green|emerald|amber|crimson|sapphire|ruby|silver|black|brown|heterochromatic)\s+eyes)/i;
+  const BODY_SPECIES_TRAIT_RE = /(?:肤色|白皙(?:的)?(?:肌肤|皮肤)|雪白(?:的)?(?:肌肤|皮肤)|苍白(?:的)?(?:肌肤|皮肤)|小麦色(?:的)?(?:肌肤|皮肤|肤色)|古铜色(?:的)?(?:肌肤|皮肤|肤色)|身材娇小|身材高挑|身材修长|身材纤细|身材丰满|体型(?:娇小|高挑|修长|纤细|健壮|魁梧)|兽耳|狐耳|猫耳|兔耳|狼耳|狗耳|犬耳|精灵耳|尖耳|龙角|恶魔角|羊角|鹿角|羽翼|翅膀|光翼|蝠翼|狐尾|猫尾|狼尾|龙尾|恶魔尾|鱼尾|尾巴|泪痣|美人痣|雀斑|胎记|疤痕|刀疤|伤疤|机械臂|义肢|义眼|(?:fox|cat|rabbit|wolf|elf|pointed)\s+ears|(?:dragon|demon)\s+horns|(?:angel|demon|feathered)?\s*wings|(?:fox|cat|wolf|dragon)\s+tail|beauty\s+mark|freckles|facial\s+scar|pale\s+skin|tanned\s+skin)/i;
+  const PERMANENT_APPEARANCE_RE = new RegExp(`${HAIR_TRAIT_RE.source}|${EYE_TRAIT_RE.source}|${BODY_SPECIES_TRAIT_RE.source}`, 'i');
+
+  // Atomic permanent trait phrases for cleanly rescuing fixed appearance from mixed clauses without leaking outfits/locations
+  const PERMANENT_HAIR_TOKEN_RE = /(?:(?:乌黑|漆黑|墨黑|雪白|银白|苍白|纯白|浅金|金黄|淡金|绯红|酒红|暗红|樱粉|浅粉|浅蓝|深蓝|冰蓝|淡紫|深紫|银灰|灰白|浅灰|栗色|棕色|茶色|咖啡色|亚麻色|墨绿|翠绿|银|白|黑|金|粉|红|蓝|紫|灰|棕|绿|茶|栗)(?:色)?(?:的)?(?:齐腰|及腰|齐肩|过肩|齐耳|披肩|微卷|大波浪|蓬松|柔顺|顺滑)?(?:长发|短发|卷发|直发|碎发|秀发|头发|发丝|马尾|双马尾|低马尾|高马尾|麻花辫|细辫|编发|丸子头|公主切|姬发式)|(?:齐腰|及腰|齐肩|披肩)(?:长发|短发|卷发|直发)|(?:双马尾|低马尾|高马尾|麻花辫|丸子头|挑染)(?:长发|短发)?|(?:silver|white|black|blonde|golden|pink|red|crimson|blue|purple|violet|grey|gray|brown|chestnut|auburn|green)\s+(?:long\s+|short\s+|wavy\s+|curly\s+|straight\s+)?hair)/gi;
+  const PERMANENT_EYE_TOKEN_RE = /(?:(?:红蓝|金蓝|红金|蓝紫|紫金|黑白)?异瞳|异色双眸|左眼[\u4e00-\u9fa5]{1,6}右眼[\u4e00-\u9fa5]{1,6}(?:的)?(?:异瞳|双眸|眼眸|瞳)?|(?:绯红|湛蓝|宝石蓝|宝石红|冰蓝|蔚蓝|海蓝|翠绿|碧绿|翡翠|琥珀|鎏金|金黄|紫罗兰|淡紫|深紫|赤红|血红|酒红|漆黑|墨黑|银灰|茶色|棕色|红|蓝|金|紫|绿|碧|黑|灰|棕)(?:色)?(?:的)?(?:瞳孔|眼眸|双眸|瞳色|眸子|眼睛|红瞳|蓝瞳|金瞳|紫瞳|绿瞳|碧瞳|黑瞳|红眸|蓝眸|金眸|紫眸|碧眸|绿眸|瞳|眸)|(?:red|blue|golden|gold|purple|violet|green|emerald|amber|crimson|sapphire|ruby|black|brown|silver|heterochromatic)\s+eyes|heterochromia)/gi;
+  const PERMANENT_BODY_TOKEN_RE = /(?:(?:白皙|雪白|苍白|小麦色|古铜色|黝黑)(?:的)?(?:肌肤|皮肤|肤色)|(?:身材|体型)(?:娇小|高挑|修长|纤细|丰满|健壮|魁梧)|(?:雪白|银色|黑色|金色|蓬松)?(?:的)?(?:狐耳|猫耳|兔耳|狼耳|狗耳|犬耳|兽耳|精灵耳|尖耳|龙角|恶魔角|羊角|鹿角|天使羽翼|恶魔羽翼|羽翼|翅膀|狐尾|猫尾|狼尾|龙尾|恶魔尾|鱼尾|尾巴)|(?:左脸颊|右脸颊|眼角|眼下)?(?:一颗)?(?:小)?(?:泪痣|美人痣)|雀斑|伤疤|刀疤|疤痕|(?:fox|cat|rabbit|wolf|elf|pointed)\s+ears|(?:dragon|demon)\s+horns|(?:angel|demon|feathered)?\s*wings|(?:fox|cat|wolf|dragon)\s+tail|beauty\s+mark|freckles)/gi;
+
+  // Transient states (outfits/nudity, locations/environments/weather, temporary actions/events) — NEVER allowed to override current floor prose
+  const TRANSIENT_OUTFIT_RE = /(?:一袭|身穿|穿着|身着|换上|换了|换穿|披着|身披|脱下|褪去|赤裸|裸露|未着寸缕|赤身|全裸|半裸|衣衫|衣裙|衣服|衣裳|服装|服饰|裙摆|长裙|短裙|连衣裙|百褶裙|礼裙|礼服|晚礼服|婚纱|汉服|旗袍|和服|浴衣|睡衣|睡裙|内衣|文胸|胸罩|内裤|比基尼|泳装|泳衣|校服|水手服|制服|西装|衬衫|衬衣|T恤|毛衣|卫衣|风衣|大衣|外套|夹克|斗篷|披风|围巾|丝巾|领带|领结|牛仔裤|长裤|短裤|热裤|白袜|黑丝|白丝|丝袜|过膝袜|连裤袜|吊带袜|高跟鞋|皮鞋|运动鞋|靴子|长靴|凉鞋|拖鞋|赤脚|光脚|手套|草帽|贝雷帽|帽子|铠甲|盔甲|战甲|长袍|道袍|女仆装|兔女郎|wearing|dressed\s+in|outfit|clothes|clothing|dress|gown|skirt|shirt|blouse|coat|trench\s+coat|jacket|scarf|uniform|pajamas|lingerie|bikini|swimsuit|stockings|pantyhose|heels|boots|naked|nude|undressed|barefoot)/i;
+  const TRANSIENT_SCENE_RE = /(?:身处|位于|来到|走进|踏入|站在|坐在|蹲在|躺在|趴在|倚在|靠在|卧室|房间|床边|床上|客厅|厨房|浴室|卫生间|阳台|露台|走廊|楼道|教室|课桌|图书馆|操场|天台|办公室|会议室|咖啡厅|咖啡馆|餐厅|酒吧|酒馆|茶寮|茶馆|旅馆|酒店|医院|病房|火车站|地铁站|车站|月台|站台|长椅|机场|港口|码头|街道|街头|小巷|广场|公园|花园|庭院|校园|学院|城堡|古塔|宫殿|大殿|神殿|教堂|森林|树林|山谷|山顶|海边|沙滩|湖畔|河边|温泉|洞穴|地牢|废墟|荒野|沙漠|雪原|马车|车厢|船舱|室内|室外|户外|黄昏|夕阳|日落|黎明|清晨|午后|夜晚|深夜|雨夜|月光|月夜|星夜|雨天|下雨|暴雨|细雨|下雪|大雪|晴天|雾气|灯火|霓虹|bedroom|room|classroom|office|cafe|bar|train\s+station|station|platform|bench|street|alley|park|garden|castle|tower|palace|forest|beach|rain|snow|sunset|dusk|dawn|night|moonlight|indoors|outdoors)/i;
+  const TRANSIENT_META_RE = /(?:^|\s)(?:世界背景|卡面设定|角色背景|剧情摘要|近期事件|近期境况|状态原子)\s*[:：]/i;
+
+  const ENTITY_STOPWORDS = new Set([
+    '我们', '你们', '他们', '她们', '它们', '自己', '此时', '这时', '随后', '然后', '突然', '已经', '正在', '仿佛', '似乎',
+    '面前', '眼前', '身旁', '身边', '身后', '声音', '语气', '神情', '表情', '目光', '眼神', '视线', '双手', '手指', '身体',
+    '心中', '心里', '脑海', '空气', '微风', '阳光', '月光', '灯光', '雨水', '黄昏', '夜色', '世界', '时间', '地方', '房间',
+    '街道', '这里', '那里', '什么', '怎么', '没有', '不是', '可以', '只是', '还是', '但是', '因为', '所以', '如果', '虽然',
+    '一个', '一位', '一只', '一把', '一颗', '女孩', '少女', '女子', '少年', '男子', '女人', '男人', '孩子', '老人', '人们',
+    '大家', '所有人', '年轻女子', '年轻女孩',
+  ]);
+
+  function analyzeFloorVisualCoverage(text) {
+    const s = String(text || '');
+    const hasHair = HAIR_TRAIT_RE.test(s);
+    const hasEyes = EYE_TRAIT_RE.test(s);
+    const hasPermanentBody = BODY_SPECIES_TRAIT_RE.test(s);
+    const hasPermanentAppearance = hasHair || hasEyes || hasPermanentBody;
+    const hasOutfit = TRANSIENT_OUTFIT_RE.test(s);
+    const hasScene = TRANSIENT_SCENE_RE.test(s);
+    const needsHairOrEyes = !hasHair || !hasEyes;
+    return {
+      hasHair,
+      hasEyes,
+      hasPermanentBody,
+      hasPermanentAppearance,
+      hasOutfit,
+      hasScene,
+      hasRichVisuals: (hasOutfit || hasScene) && hasPermanentAppearance,
+      needsHairOrEyes,
+      needsFixedAppearance: !hasHair || !hasEyes,
+    };
+  }
+
+  function extractAtomicPermanentTokens(text, opts = {}) {
+    const tokens = [];
+    const seen = new Set();
+    const collect = (re) => {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        const tok = String(m[0] || '').trim().replace(/^的+/, '');
+        if (!tok) continue;
+        const key = normText(tok);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        tokens.push(tok);
+        if (tokens.length >= 4) break;
+      }
+    };
+    if (!opts.skipHair) collect(PERMANENT_HAIR_TOKEN_RE);
+    if (!opts.skipEyes) collect(PERMANENT_EYE_TOKEN_RE);
+    if (!opts.skipBody && tokens.length < 4) collect(PERMANENT_BODY_TOKEN_RE);
+    return tokens;
+  }
+
+  function extractPermanentAppearance(rawText, opts = {}) {
+    const cleaned = cleanFloorForDistill(rawText || '', false);
+    if (!cleaned) return '';
+    const keepClauses = [];
+    const seen = new Set();
+
+    const pushUniq = (str) => {
+      const s = String(str || '').replace(/^[·•\-—:：\s]+/, '').trim();
+      if (!s || s.length < 2) return;
+      const sig = normText(s);
+      if (seen.has(sig)) return;
+      // Avoid adding a shorter duplicate already contained in an existing clause
+      for (const existing of seen) {
+        if (existing.includes(sig)) return;
+      }
+      seen.add(sig);
+      keepClauses.push(s);
+    };
+
+    const sentences = cleaned.split(/[。！？!\?\n；;]+/);
+    for (const sent of sentences) {
+      const st = sent.trim();
+      if (!st || TRANSIENT_META_RE.test(st)) continue;
+      const clauses = st.split(/[，,]+/);
+      for (const rawCl of clauses) {
+        const cl = rawCl.trim();
+        if (!cl || cl.length < 2) continue;
+        if (!PERMANENT_APPEARANCE_RE.test(cl)) continue;
+
+        const hasTransient = TRANSIENT_OUTFIT_RE.test(cl) || TRANSIENT_SCENE_RE.test(cl);
+        if (!hasTransient && cl.length <= 64) {
+          const isHair = HAIR_TRAIT_RE.test(cl);
+          const isEyes = EYE_TRAIT_RE.test(cl);
+          const isBody = BODY_SPECIES_TRAIT_RE.test(cl);
+          const wantsHair = isHair && !opts.skipHair;
+          const wantsEyes = isEyes && !opts.skipEyes;
+          const wantsBody = isBody && !opts.skipBody;
+          if ((wantsHair || wantsEyes || wantsBody) && !(isHair && opts.skipHair && !wantsEyes && !wantsBody)) {
+            if ((isHair && opts.skipHair) || (isEyes && opts.skipEyes)) {
+              const toks = extractAtomicPermanentTokens(cl, opts);
+              if (toks.length) pushUniq(toks.join('、'));
+            } else {
+              pushUniq(cl);
+            }
+          }
+        } else {
+          // Mixed clause (contains outfit/location/scene alongside hair/eyes): extract ONLY atomic permanent tokens
+          const toks = extractAtomicPermanentTokens(cl, opts);
+          if (toks.length) pushUniq(toks.join('、'));
+        }
+        if (keepClauses.length >= 3) break;
+      }
+      if (keepClauses.length >= 3) break;
+    }
+
+    return keepClauses.join('，').slice(0, 120);
+  }
+
+  function extractActiveEntities(ctx, mesObj, curCleanText, coverage) {
+    const curLower = normText(curCleanText);
+    const explicit = new Set();
+    const addIfInFloor = (name) => {
+      const n = String(name || '').trim();
+      if (!n || ENTITY_STOPWORDS.has(n)) return;
+      const minLen = /[\u4e00-\u9fa5]/.test(n) ? 2 : 3;
+      if (n.length < minLen || n.length > 16) return;
+      if (curLower.includes(normText(n))) explicit.add(n);
+    };
+
+    const ch = ctx?.characters?.[ctx.characterId];
+    addIfInFloor(mesObj?.name);
+    addIfInFloor(ctx?.name2);
+    addIfInFloor(ch?.name);
+
+    try {
+      const lwbJson = ctx?.chatMetadata?.extensions?.LittleWhiteBox?.storySummary?.json;
+      for (const person of lwbJson?.characters?.main || []) {
+        addIfInFloor(typeof person === 'string' ? person : person?.name);
+      }
+      for (const alias of lwbJson?.characterAliases || []) {
+        addIfInFloor(alias?.from);
+        addIfInFloor(alias?.to);
+      }
+    } catch {}
+
+    const nameMatches = curCleanText.match(/[A-Z][a-z]{2,14}|[\u4e00-\u9fa5]{2,4}(?=(?:说|笑|问|看|望|低头|抬手|抬眼|转身|轻声|微微|轻轻|缓步|推开|走|站|坐|蹲|躺|嘴角|眼角|手中|的))/g) || [];
+    for (const rawN of nameMatches.slice(0, 12)) {
+      const n = String(rawN || '').trim();
+      if (n.length >= 2 && n.length <= 14 && !ENTITY_STOPWORDS.has(n) && !PERMANENT_APPEARANCE_RE.test(n) && !TRANSIENT_OUTFIT_RE.test(n) && !TRANSIENT_SCENE_RE.test(n)) {
+        explicit.add(n);
+      }
+    }
+
+    // Only fall back to the card/speaker name when the current floor has NO explicit character names
+    // AND has NO explicit appearance description of its own (e.g. pronoun-only dialogue "她微笑着说...").
+    const fallback = new Set();
+    if (explicit.size === 0 && !coverage.hasPermanentAppearance) {
+      for (const cand of [mesObj?.name, ctx?.name2, ch?.name]) {
+        const n = String(cand || '').trim();
+        if (n && n.length >= 2 && n.length <= 16 && !ENTITY_STOPWORDS.has(n)) {
+          fallback.add(n);
+        }
+      }
+    }
+
+    return {
+      explicit,
+      all: explicit.size > 0 ? explicit : fallback,
+      usedFallback: explicit.size === 0 && fallback.size > 0,
+    };
+  }
+
+  function collectVariableVisualHints(obj, out, coverage, permOpts, depth = 0, prefix = '') {
+    if (!obj || typeof obj !== 'object' || depth > 4 || out.length >= 6) return;
     if (Array.isArray(obj)) {
       for (const item of obj.slice(0, 12)) {
-        if (out.length >= 10) break;
+        if (out.length >= 6) break;
         if (item && typeof item === 'object') {
-          collectVariableVisualHints(item, out, depth + 1, prefix);
+          collectVariableVisualHints(item, out, coverage, permOpts, depth + 1, prefix);
         }
       }
       return;
     }
     for (const [k, v] of Object.entries(obj)) {
-      if (out.length >= 10) break;
+      if (out.length >= 6) break;
       if (NOISE_VAR_KEY_RE.test(k)) continue;
       const fullKey = prefix ? `${prefix}·${k}` : k;
       if (typeof v === 'string') {
         const vs = cleanFloorForDistill(v, false);
-        if (vs && vs.length >= 2 && vs.length <= 160 && (VIS_KEY_RE.test(fullKey) || STORY_VIS_RE.test(vs))) {
-          out.push(`${fullKey}: ${vs}`);
+        if (!vs || vs.length < 2 || vs.length > 160) continue;
+        // Strictly ignore outfit/scene variables once current floor describes them, or if not permanent appearance
+        if (OUTFIT_KEY_RE.test(fullKey) || SCENE_KEY_RE.test(fullKey)) continue;
+        if (PERMANENT_KEY_RE.test(fullKey) || PERMANENT_APPEARANCE_RE.test(vs)) {
+          const perm = extractPermanentAppearance(vs, permOpts);
+          if (perm) out.push(`${fullKey}：${perm}`);
         }
       } else if (v && typeof v === 'object') {
-        collectVariableVisualHints(v, out, depth + 1, k === 'stat_data' ? prefix : fullKey);
+        collectVariableVisualHints(v, out, coverage, permOpts, depth + 1, k === 'stat_data' ? prefix : fullKey);
       }
     }
   }
 
-  function collectXiaobaiXMemory(ctx, mesId, curLower, prevLower) {
+  function collectXiaobaiXMemory(ctx, mesId, curLower, entities, coverage, permOpts) {
     const items = [];
+    if (!coverage.needsFixedAppearance || entities.all.size === 0) return items;
     try {
       const lwb = ctx?.chatMetadata?.extensions?.LittleWhiteBox;
       if (!lwb || typeof lwb !== 'object') return items;
 
       const json = lwb.storySummary?.json;
-      const atoms = Array.isArray(lwb.stateAtoms) ? lwb.stateAtoms : [];
+      if (!json || typeof json !== 'object') return items;
+
+      const aliases = Array.isArray(json.characterAliases) ? json.characterAliases : [];
+      const aliasMap = new Map();
+      for (const a of aliases) {
+        const canonical = String(a?.to || '').trim();
+        const alt = String(a?.from || '').trim();
+        if (!canonical || !alt) continue;
+        if (!aliasMap.has(canonical)) aliasMap.set(canonical, []);
+        aliasMap.get(canonical).push(alt);
+      }
+
       const activeNames = new Set();
-
-      if (json && typeof json === 'object') {
-        const aliases = Array.isArray(json.characterAliases) ? json.characterAliases : [];
-        const aliasMap = new Map();
-        for (const a of aliases) {
-          const canonical = String(a?.to || '').trim();
-          const alt = String(a?.from || '').trim();
-          if (!canonical || !alt) continue;
-          if (!aliasMap.has(canonical)) aliasMap.set(canonical, []);
-          aliasMap.get(canonical).push(alt);
-        }
-
-        const charPeople = [];
-        for (const person of json.characters?.main || []) {
-          if (person?._addedAt !== undefined && Number(person._addedAt) > mesId) continue;
-          const pName = String(typeof person === 'string' ? person : person?.name || '').trim();
-          if (!pName) continue;
-          const allNames = [pName, ...(aliasMap.get(pName) || [])];
-          let charScore = 0;
-          for (const n of allNames) {
-            charScore = Math.max(charScore, matchTermScore(n, curLower, prevLower));
-          }
-          charPeople.push({ name: pName, allNames, score: charScore });
-          if (charScore > 0) {
-            allNames.forEach((n) => activeNames.add(normText(n)));
-          }
-        }
-
-        // If prose uses pronouns only ("她/他"), peek at latest stateAtoms <= mesId to infer active characters
-        if (activeNames.size === 0 && atoms.length > 0 && charPeople.length > 0) {
-          const recentAtoms = atoms
-            .filter((a) => a && Number(a.floor) <= mesId)
-            .sort((a, b) => Number(b.floor || 0) - Number(a.floor || 0))
-            .slice(0, 3);
-          const atomBlob = recentAtoms
-            .map((a) => `${a.semantic || ''} ${a.where || ''} ${(a.edges || []).map((e) => `${e?.s || ''} ${e?.t || ''}`).join(' ')}`)
-            .join(' ')
-            .toLowerCase();
-          for (const cp of charPeople) {
-            if (cp.allNames.some((n) => n && atomBlob.includes(normText(n)))) {
-              cp.allNames.forEach((n) => activeNames.add(normText(n)));
-            }
-          }
-        }
-
-        const eventsList = Array.isArray(json.events)
-          ? json.events.filter((ev) => ev && (ev._addedAt === undefined || Number(ev._addedAt) <= mesId))
-          : [];
-        if (activeNames.size === 0 && eventsList.length > 0 && charPeople.length > 0) {
-          const recentEvBlob = eventsList
-            .slice(-2)
-            .map((ev) => `${(ev.participants || []).join(' ')} ${ev.title || ''} ${ev.summary || ''}`)
-            .join(' ')
-            .toLowerCase();
-          for (const cp of charPeople) {
-            if (cp.allNames.some((n) => n && recentEvBlob.includes(normText(n)))) {
-              cp.allNames.forEach((n) => activeNames.add(normText(n)));
-            }
-          }
-        }
-
-        const visPredRe = /(外貌|长相|容貌|身体|特征|发[色型]|瞳[色眸]|肤色|身材|着装|衣着|服饰|穿着|装扮|服装|装饰|饰品|束缚|状态|伤[势痕]|形态|物种|种族|身份|地点|位置|场景|所在|appearance|body|cloth|outfit|hair|eye|location|state)/i;
-        for (const fact of json.facts || []) {
-          if (!fact || fact.retracted) continue;
-          if (fact._addedAt !== undefined && Number(fact._addedAt) > mesId) continue;
-          const s = String(fact.s || '').trim();
-          const p = String(fact.p || '').trim();
-          const o = String(fact.o || '').trim();
-          if (!s || !p || !o) continue;
-
-          const sHit = activeNames.has(normText(s)) ? 4 : matchTermScore(s, curLower, prevLower);
-          const oHit = activeNames.has(normText(o)) ? 2 : matchTermScore(o, curLower, prevLower);
-          const isVisual = visPredRe.test(p) || visPredRe.test(o);
-          let score = sHit + oHit + (isVisual ? 6 : 0);
-          if (sHit === 0 && oHit === 0) score = 0;
-          if (score >= 6) {
-            items.push({
-              score: score + (fact._isState ? 0.5 : 0),
-              text: `${s} · ${p}：${o.slice(0, 140)}`,
-            });
-          }
-        }
-
-        const matchedEvents = [];
-        for (const ev of eventsList) {
-          const title = String(ev.title || '').trim();
-          const summary = cleanFloorForDistill(ev.summary || '', false);
-          if (!summary) continue;
-          const parts = Array.isArray(ev.participants) ? ev.participants : [];
-          const hasParticipant = parts.some((p) => activeNames.has(normText(p)) || matchTermScore(p, curLower, prevLower) > 0);
-          const txtHit = matchTermScore(title, curLower, prevLower) > 0 || matchTermScore(summary, curLower, prevLower) > 0;
-          if (hasParticipant || txtHit) {
-            matchedEvents.push({
-              score: 5.2,
-              text: `近期事件${title ? `「${title.slice(0, 24)}」` : ''}：${summary.slice(0, 140)}`,
-            });
-          }
-        }
-        items.push(...matchedEvents.slice(-2));
-
-        for (const arc of json.arcs || []) {
-          if (arc?._addedAt !== undefined && Number(arc._addedAt) > mesId) continue;
-          const aName = String(arc?.name || '').trim();
-          if (!aName || !activeNames.has(normText(aName))) continue;
-          const latestMoment = (arc.moments || [])
-            .filter((m) => m?._addedAt == null || Number(m._addedAt) <= mesId)
-            .slice(-1)[0];
-          const mTxt = String(typeof latestMoment === 'string' ? latestMoment : latestMoment?.text || '').trim();
-          const traj = String(arc.trajectory || '').trim();
-          const note = mTxt || traj;
-          if (note) {
-            items.push({ score: 5, text: `${aName} 近期境况：${note.slice(0, 100)}` });
-          }
+      for (const n of entities.all) activeNames.add(normText(n));
+      for (const person of json.characters?.main || []) {
+        if (person?._addedAt !== undefined && Number(person._addedAt) > mesId) continue;
+        const pName = String(typeof person === 'string' ? person : person?.name || '').trim();
+        if (!pName) continue;
+        const allNames = [pName, ...(aliasMap.get(pName) || [])];
+        if (allNames.some((n) => activeNames.has(normText(n)) || matchTermScore(n, curLower, '') > 0)) {
+          allNames.forEach((n) => activeNames.add(normText(n)));
         }
       }
 
-      if (atoms.length > 0) {
-        const candAtoms = atoms
-          .filter((a) => a && Number(a.floor) <= mesId && a.semantic)
-          .sort((a, b) => Number(b.floor || 0) - Number(a.floor || 0))
-          .slice(0, 6);
-        for (const a of candAtoms) {
-          const sem = cleanFloorForDistill(a.semantic, false);
-          if (!sem) continue;
-          const edgeStr = (a.edges || [])
-            .filter((e) => e && e.s && e.r && e.t)
-            .slice(0, 4)
-            .map((e) => `${e.s}-${e.r}-${e.t}`)
-            .join('；');
-          let score = Number(a.floor) === mesId ? 7.5 : 4.5;
-          for (const tok of activeNames) {
-            if (sem.toLowerCase().includes(tok) || edgeStr.toLowerCase().includes(tok)) {
-              score += 2.5;
-              break;
-            }
-          }
-          const loc = a.where ? `@${a.where}` : '';
-          const body = edgeStr ? `${sem.slice(0, 120)} (${edgeStr})` : sem.slice(0, 140);
-          items.push({ score, text: `状态原子${loc}：${body}` });
-        }
+      // Only pull permanent fixed physical facts for active characters; never inject past events, arcs, stale outfits, or old locations
+      for (const fact of json.facts || []) {
+        if (!fact || fact.retracted) continue;
+        if (fact._addedAt !== undefined && Number(fact._addedAt) > mesId) continue;
+        const s = String(fact.s || '').trim();
+        const p = String(fact.p || '').trim();
+        const o = String(fact.o || '').trim();
+        if (!s || !p || !o) continue;
+        if (OUTFIT_KEY_RE.test(p) || SCENE_KEY_RE.test(p)) continue;
+
+        const sActive = activeNames.has(normText(s)) || matchTermScore(s, curLower, '') > 0;
+        if (!sActive) continue;
+        if (!PERMANENT_KEY_RE.test(p) && !PERMANENT_APPEARANCE_RE.test(o)) continue;
+
+        const perm = extractPermanentAppearance(o, permOpts);
+        if (!perm) continue;
+        items.push({
+          score: 8.5 + (HAIR_TRAIT_RE.test(perm) || EYE_TRAIT_RE.test(perm) ? 1.5 : 0),
+          text: `${s}固定外貌：${perm}`,
+        });
       }
     } catch {}
     return items;
@@ -652,7 +828,7 @@
     return '';
   }
 
-  function extractVisualStatusFromRaw(raw) {
+  function extractVisualStatusFromRaw(raw, coverage, permOpts) {
     const items = [];
     if (!raw || typeof raw !== 'string') return items;
     try {
@@ -671,64 +847,86 @@
 
       const cleaned = scanSrc
         .replace(/<summary[^>]*>[\s\S]*?<\/summary>/gi, '')
-        .replace(/<[^>]+>/g, '\n');
+        .replace(/<\/?[a-zA-Z][a-zA-Z0-9:_-]*(?:\s+[^<>]*)?\/?>/g, '\n');
       for (const line of cleaned.split(/\r?\n/)) {
         const kv = line.match(/^\s*["']?([^"'：:=|\n]{2,18})["']?\s*[:：=]\s*["']?([^"'}\]\n]{2,90})/);
         if (!kv) continue;
         const k = kv[1].trim();
         const v = kv[2].replace(/,\s*$/, '').trim();
-        if (!VIS_KEY_RE.test(k) || !v || /^\d+(?:\/\d+)?%?$/.test(v)) continue;
-        items.push({ score: 6.5, text: `当前状态栏 ${k}：${v}` });
-        if (items.length >= 5) break;
+        if (!v || /^\d+(?:\/\d+)?%?$/.test(v)) continue;
+
+        if (PERMANENT_KEY_RE.test(k)) {
+          if (!coverage.needsFixedAppearance) continue;
+          const perm = extractPermanentAppearance(v, permOpts);
+          if (perm) items.push({ score: 7.2, text: `${k}：${perm}` });
+        } else if (OUTFIT_KEY_RE.test(k)) {
+          // Only read current-floor statusbar outfit if the prose itself did NOT describe outfit
+          if (coverage.hasOutfit || coverage.hasScene) continue;
+          items.push({ score: 4.5, text: `当前${k}：${v}` });
+        } else if (SCENE_KEY_RE.test(k)) {
+          // Only read current-floor statusbar location if the prose itself did NOT describe scene/outfit
+          if (coverage.hasScene || coverage.hasOutfit) continue;
+          items.push({ score: 4.2, text: `当前${k}：${v}` });
+        }
+        if (items.length >= 3) break;
       }
     } catch {}
     return items;
   }
 
-  function extractGenericTableItems(container, curLower, prevLower, items, depth = 0) {
-    if (!container || typeof container !== 'object' || depth > 4 || items.length >= 20) return;
+  function extractGenericTableItems(container, curLower, entities, permOpts, items, depth = 0) {
+    if (!container || typeof container !== 'object' || depth > 4 || items.length >= 8) return;
+    const entityList = Array.from(entities.all);
+    const matchEntity = (txt) => entityList.find((e) => normText(txt).includes(normText(e))) || '';
+
     if (Array.isArray(container)) {
       if (container.length > 0 && Array.isArray(container[0])) {
-        const headers = container[0].map((h) => String(h ?? '').trim()).filter(Boolean);
+        const headers = container[0].map((h) => String(h ?? '').trim());
         for (let r = 1; r < container.length && r < 40; r++) {
           const row = container[r];
           if (!Array.isArray(row)) continue;
-          const cells = [];
+          const rowFull = row.map((c) => String(c ?? '')).join(' ');
+          const hitName = matchEntity(rowFull);
+          if (!hitName) continue;
+          const permParts = [];
           for (let c = 0; c < row.length; c++) {
+            const hk = headers[c] || '';
             const val = String(row[c] ?? '').replace(/\s+/g, ' ').trim();
             if (!val || val === '-' || val === '无') continue;
-            const hk = headers[c] && headers[c].length <= 16 ? `${headers[c]}:` : '';
-            cells.push(`${hk}${val}`.slice(0, 60));
+            if (OUTFIT_KEY_RE.test(hk) || SCENE_KEY_RE.test(hk)) continue;
+            if (PERMANENT_KEY_RE.test(hk) || PERMANENT_APPEARANCE_RE.test(val)) {
+              const p = extractPermanentAppearance(val, permOpts);
+              if (p) permParts.push(p);
+            }
           }
-          const rowTxt = cells.join(' · ').slice(0, 180);
-          if (!rowTxt || (!STORY_VIS_RE.test(rowTxt) && !VIS_KEY_RE.test(rowTxt) && matchTermScore(cells[0] || '', curLower, prevLower) === 0)) {
-            continue;
+          if (permParts.length) {
+            items.push({ score: 7.4, text: `${hitName}固定外貌：${permParts.join('，').slice(0, 110)}` });
           }
-          const hit = cells.some((c) => matchTermScore(c, curLower, prevLower) > 0);
-          items.push({
-            score: (hit ? 6.2 : 3.4) + (STORY_VIS_RE.test(rowTxt) || VIS_KEY_RE.test(rowTxt) ? 1.5 : 0),
-            text: `表格记忆：${rowTxt}`,
-          });
         }
         return;
       }
       for (const el of container.slice(0, 40)) {
-        if (items.length >= 20) break;
+        if (items.length >= 8) break;
         if (el && typeof el === 'object' && !Array.isArray(el)) {
-          const parts = [];
+          const rawBlob = Object.values(el).filter((v) => typeof v === 'string').join(' ');
+          const hitName = matchEntity(rawBlob);
+          if (!hitName) continue;
+          const permParts = [];
           for (const [k, v] of Object.entries(el)) {
-            if (v == null || typeof v === 'object') continue;
+            if (v == null || typeof v === 'object' || NOISE_VAR_KEY_RE.test(k)) continue;
+            if (OUTFIT_KEY_RE.test(k) || SCENE_KEY_RE.test(k)) continue;
             const sv = String(v).replace(/\s+/g, ' ').trim();
-            if (!sv || NOISE_VAR_KEY_RE.test(k)) continue;
-            parts.push(`${k}:${sv.slice(0, 60)}`);
+            if (!sv) continue;
+            if (PERMANENT_KEY_RE.test(k) || PERMANENT_APPEARANCE_RE.test(sv)) {
+              const p = extractPermanentAppearance(sv, permOpts);
+              if (p) permParts.push(p);
+            }
           }
-          const rowTxt = parts.join(' · ').slice(0, 180);
-          if (rowTxt && (STORY_VIS_RE.test(rowTxt) || VIS_KEY_RE.test(rowTxt))) {
-            const hit = parts.some((p) => matchTermScore(p.split(':')[1] || p, curLower, prevLower) > 0);
-            items.push({ score: hit ? 6.0 : 3.5, text: `数据库记录：${rowTxt}` });
+          if (permParts.length) {
+            items.push({ score: 7.2, text: `${hitName}固定外貌：${permParts.join('，').slice(0, 110)}` });
           }
         } else {
-          extractGenericTableItems(el, curLower, prevLower, items, depth + 1);
+          extractGenericTableItems(el, curLower, entities, permOpts, items, depth + 1);
         }
       }
       return;
@@ -736,17 +934,19 @@
     for (const [k, v] of Object.entries(container)) {
       if (k === 'LittleWhiteBox') continue;
       if (v && typeof v === 'object') {
-        extractGenericTableItems(v, curLower, prevLower, items, depth + 1);
+        extractGenericTableItems(v, curLower, entities, permOpts, items, depth + 1);
       }
     }
   }
 
-  function collectUniversalMemoryPlugins(ctx, mesObj, curLower, prevLower) {
+  function collectUniversalMemoryPlugins(ctx, mesObj, curLower, entities, coverage, permOpts) {
     const items = [];
+    if (!coverage.needsFixedAppearance || entities.all.size === 0) return items;
     const promptKeyRe = /memory|table|sheet|summary|amily|vector|lore|note|remember|rag|db|mem|状态|记忆|总结|表格/i;
     const systemBoilerplateRe = /(?:You are an AI|Write the next|jailbreak|system prompt|roleplay as|uncensored model|<rules>)/i;
+    const entityList = Array.from(entities.all);
 
-    // 1. Third-party extensionPrompts (表格记忆 st-memory-enhancement, Amily2, VectorStorage, Summarize, Author's Note, etc.)
+    // 1. Third-party extensionPrompts — strictly extract permanent appearance only for active characters
     try {
       const extPrompts = ctx?.extensionPrompts || {};
       for (const [key, val] of Object.entries(extPrompts)) {
@@ -757,43 +957,31 @@
 
         const cleaned = cleanFloorForDistill(rawStr, false);
         if (!cleaned) continue;
-        const isMemKey = promptKeyRe.test(key);
         const lines = cleaned.split(/\r?\n/);
         for (const rawLine of lines) {
           let line = rawLine.trim();
           if (!line || /^\|?[\s:-]{3,}(?:\|[\s:-]+)+\|?$/.test(line)) continue;
-          if (systemBoilerplateRe.test(line)) continue;
+          if (systemBoilerplateRe.test(line) || TRANSIENT_META_RE.test(line)) continue;
           if (line.includes('|')) {
-            line = line
-              .split('|')
-              .map((c) => c.trim())
-              .filter(Boolean)
-              .join(' · ');
+            line = line.split('|').map((c) => c.trim()).filter(Boolean).join('，');
           }
-          if (line.length < 8 || line.length > 220) continue;
+          if (line.length < 6 || line.length > 260) continue;
 
-          const visMatch = VIS_KEY_RE.test(line) || STORY_VIS_RE.test(line);
-          const tokens = line.split(/[\s·：:,，、]+/).filter((t) => t.length >= 2).slice(0, 5);
-          const hitScore = tokens.reduce((acc, tok) => Math.max(acc, matchTermScore(tok, curLower, prevLower)), 0);
-          if (!visMatch && !(isMemKey && hitScore > 0)) continue;
+          const hitName = entityList.find((e) => normText(line).includes(normText(e)));
+          if (!hitName) continue;
+          const perm = extractPermanentAppearance(line, permOpts);
+          if (!perm) continue;
 
-          const score = 3.2 + (isMemKey ? 1.5 : 0) + (visMatch ? 2.2 : 0) + hitScore;
-          items.push({ score, text: `记忆插件：${line.slice(0, 180)}` });
+          items.push({
+            score: 6.8 + (promptKeyRe.test(key) ? 0.8 : 0),
+            text: `${hitName}固定外貌：${perm}`,
+          });
         }
       }
     } catch {}
 
-    // 2. Built-in summaries & generic table metadata (st-memory-enhancement sheets/hash_sheets, custom DBs)
+    // 2. Generic table metadata (st-memory-enhancement sheets/hash_sheets, custom DBs) — NEVER inject plot summaries
     try {
-      const summaryTexts = [
-        ctx?.chatMetadata?.memory?.summary,
-        ctx?.chatMetadata?.summary,
-        mesObj?.extra?.summary,
-      ];
-      for (const stSum of summaryTexts) {
-        const s = cleanFloorForDistill(stSum || '', false);
-        if (s) items.push({ score: 4.5, text: `剧情摘要：${s.slice(0, 240)}` });
-      }
       const tableContainers = [
         ctx?.chatMetadata?.sheets,
         ctx?.chatMetadata?.hash_sheets,
@@ -804,43 +992,48 @@
         mesObj?.extra?.memory,
       ];
       for (const tc of tableContainers) {
-        if (tc) extractGenericTableItems(tc, curLower, prevLower, items);
+        if (tc) extractGenericTableItems(tc, curLower, entities, permOpts, items);
       }
     } catch {}
 
-    // 3. Deep variables scan (MVU stat_data, swipe variables, chat/global variables)
+    // 3. Variables scan — strictly permanent appearance traits only (never stale outfits/locations)
     try {
       const varHints = [];
       const activeSwipeVars = Array.isArray(mesObj?.variables)
         ? mesObj.variables[mesObj.swipe_id ?? 0]
         : null;
-      collectVariableVisualHints(activeSwipeVars, varHints);
-      collectVariableVisualHints(mesObj?.variables, varHints);
-      collectVariableVisualHints(ctx?.chatMetadata?.variables, varHints);
-      collectVariableVisualHints(ctx?.variables?.local, varHints);
-      for (const vh of varHints.slice(0, 8)) {
-        items.push({ score: 5.0, text: `当前状态变量 ${vh}` });
+      collectVariableVisualHints(activeSwipeVars, varHints, coverage, permOpts);
+      collectVariableVisualHints(mesObj?.variables, varHints, coverage, permOpts);
+      collectVariableVisualHints(ctx?.chatMetadata?.variables, varHints, coverage, permOpts);
+      collectVariableVisualHints(ctx?.variables?.local, varHints, coverage, permOpts);
+      for (const vh of varHints.slice(0, 3)) {
+        items.push({ score: 6.2, text: vh });
       }
     } catch {}
 
     return items;
   }
 
-  function collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, maxLookback = 30) {
+  function collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, maxLookback = 30, coverageArg = null, entitiesArg = null) {
     const items = [];
     try {
       const chat = ctx?.chat || [];
       if (!chat.length || mesId <= 0) return items;
 
-      const entityHints = new Set();
-      const addHint = (tok) => {
-        const t = String(tok || '').trim();
-        if (t.length >= 2 && t.length <= 12) entityHints.add(t);
+      const coverage = coverageArg || analyzeFloorVisualCoverage(curCleanText);
+      // When current floor ALREADY specifies both hair & eyes (or explicit appearance + outfit/scene without naming another entity),
+      // NEVER pull stale historical traits from earlier floors.
+      if (!coverage.needsFixedAppearance) return items;
+
+      const entities = entitiesArg || extractActiveEntities(ctx, mesObj, curCleanText, coverage);
+      if (entities.all.size === 0) return items;
+
+      const entityList = Array.from(entities.all);
+      const permOpts = {
+        skipHair: coverage.hasHair,
+        skipEyes: coverage.hasEyes,
+        skipBody: coverage.hasPermanentBody,
       };
-      addHint(mesObj?.name);
-      addHint(ctx?.name2);
-      const curNames = curCleanText.match(/[A-Z][a-z]{2,14}|[\u4e00-\u9fa5]{2,4}(?=(?:说|笑|问|看|望|低头|抬手|转身|轻声|的))/g) || [];
-      for (const n of curNames.slice(0, 12)) addHint(n);
 
       const startIdx = Math.max(0, mesId - maxLookback);
       for (let i = mesId - 1; i >= startIdx; i--) {
@@ -850,29 +1043,26 @@
         if (!clean) continue;
 
         const dist = mesId - 1 - i;
-        const sentences = clean.split(/[。！？!\?\n]+/);
+        const sentences = clean.split(/[。！？!\?\n；;]+/);
         for (const rawSent of sentences) {
           const s = rawSent.trim();
-          if (s.length < 10 || s.length > 150) continue;
-          if (!STORY_VIS_RE.test(s)) continue;
+          if (s.length < 4 || s.length > 220) continue;
+          if (!PERMANENT_APPEARANCE_RE.test(s)) continue;
 
-          const hasStickyAppearance = APPEARANCE_STICKY_RE.test(s);
-          // Skip stale location-only lines from >3 turns back so old rooms never override current scene
-          if (dist >= 3 && !hasStickyAppearance) continue;
+          const matchedName = entityList.find((tok) => s.includes(tok))
+            || (entities.usedFallback && m.name && entityList.includes(m.name) ? m.name : '');
+          if (!matchedName) continue;
 
-          let entityBoost = 0;
-          for (const tok of entityHints) {
-            if (s.includes(tok)) {
-              entityBoost = 2.6;
-              break;
-            }
-          }
-          const speaker = m.name || (m.is_user ? ctx?.name1 : ctx?.name2) || '';
-          const recency = Math.max(1.0, 4.4 - dist * 0.12);
-          const score = recency + (hasStickyAppearance ? 2.1 : 0.4) + entityBoost;
+          // Strictly extract ONLY permanent physical traits (hair/eyes/species/marks), stripping any stale outfit or location!
+          const perm = extractPermanentAppearance(s, permOpts);
+          if (!perm) continue;
+
+          const hasHairOrEye = HAIR_TRAIT_RE.test(perm) || EYE_TRAIT_RE.test(perm);
+          const recency = Math.max(1.5, 5.0 - dist * 0.08);
+          const score = recency + (hasHairOrEye ? 3.2 : 1.0) + (entities.explicit.has(matchedName) ? 2.0 : 0.8);
           items.push({
             score,
-            text: `${speaker ? `${speaker}前文` : '前文特征'}：${s}`,
+            text: `${matchedName}固定外貌：${perm}`,
           });
         }
       }
@@ -884,7 +1074,6 @@
     const ch = ctx?.characters?.[ctx.characterId];
     const chData = ch?.data || {};
     const curLower = normText(curCleanText);
-    const prevLower = normText(prevCleanText);
 
     const userName = ctx?.name1 || '';
     const userAppearance = String(ctx?.powerUserSettings?.persona_description || '').trim().slice(0, 220);
@@ -895,36 +1084,32 @@
       return { memoryContext: '', userName, userAppearance, prevVisualPrompt: '' };
     }
 
+    const coverage = analyzeFloorVisualCoverage(curCleanText);
+    const entities = extractActiveEntities(ctx, mesObj, curCleanText, coverage);
+    const permOpts = {
+      skipHair: coverage.hasHair,
+      skipEyes: coverage.hasEyes,
+      skipBody: coverage.hasPermanentBody,
+    };
+
     const candidates = [];
 
-    // Status block visual cues extracted before tag stripping (works in both smart & story_only)
-    candidates.push(...extractVisualStatusFromRaw(rawFloorText || mesObj?.mes || ''));
+    // Status block cues from the CURRENT floor only (strictly filtered so prose outfit/scene is never overridden)
+    candidates.push(...extractVisualStatusFromRaw(rawFloorText || mesObj?.mes || '', coverage, permOpts));
 
     if (memoryMode === 'story_only') {
-      candidates.push(...collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, 35));
-    } else {
-      // Source A: 小白X (storySummary.json + stateAtoms)
-      const xbxItems = collectXiaobaiXMemory(ctx, mesId, curLower, prevLower);
+      candidates.push(...collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, 30, coverage, entities));
+    } else if (coverage.needsFixedAppearance && entities.all.size > 0) {
+      // Source A: 小白X permanent appearance facts only
+      const xbxItems = collectXiaobaiXMemory(ctx, mesId, curLower, entities, coverage, permOpts);
       candidates.push(...xbxItems);
 
-      // Source B: Universal third-party memory plugins (extensionPrompts, tables, MVU/chat vars)
-      const pluginItems = collectUniversalMemoryPlugins(ctx, mesObj, curLower, prevLower);
+      // Source B: Universal third-party memory plugins (permanent appearance traits only)
+      const pluginItems = collectUniversalMemoryPlugins(ctx, mesObj, curLower, entities, coverage, permOpts);
       candidates.push(...pluginItems);
 
-      // Source C: Card scenario / description brief
-      try {
-        const rawScenario = String(chData.scenario || ch?.scenario || '').trim();
-        if (rawScenario) {
-          candidates.push({ score: 3.5, text: `世界背景：${cleanFloorForDistill(rawScenario, false).slice(0, 220)}` });
-        } else {
-          const rawDesc = String(chData.description || ch?.description || '').trim();
-          if (rawDesc) {
-            candidates.push({ score: 2.5, text: `卡面设定：${cleanFloorForDistill(rawDesc, false).slice(0, 220)}` });
-          }
-        }
-      } catch {}
-
-      // Source D: SillyTavern World Info (embedded character_book + linked external + chat metadata)
+      // Source C: SillyTavern World Info (ONLY entries matching active entities in current floor, filtered to permanent traits)
+      // NOTE: Raw card `scenario` ("世界背景：") and raw `description` ("卡面设定：") are NEVER dumped into memory_context!
       const rawEntries = [];
       const addBookEntries = (book) => {
         if (!book?.entries) return;
@@ -954,6 +1139,7 @@
         }
       }
 
+      const entityList = Array.from(entities.all);
       const seenLore = new Set();
       for (const entry of rawEntries) {
         if (entry.disable === true) continue;
@@ -968,32 +1154,39 @@
           ...splitLoreKeys(entry.keys),
           ...splitLoreKeys(entry.keysecondary),
         ];
-        let score = 0;
-        const matchedKeys = [];
-        for (const k of keys) {
-          const hit = matchTermScore(k, curLower, prevLower);
-          if (hit > 0) {
-            score += hit;
-            matchedKeys.push(k);
-          }
-        }
-        if (score === 0 && entry.constant && contentClean.length <= 260) {
-          score = 1.5;
-        }
-        if (score > 0) {
-          const title = (entry.comment || matchedKeys[0] || '世界设定').toString().trim().slice(0, 28);
-          candidates.push({ score: score + 2, text: `${title}：${contentClean.slice(0, 240)}` });
-        }
+        const matchedKey = keys.find((k) => matchTermScore(k, curLower, '') > 0)
+          || entityList.find((e) => keys.some((k) => normText(k) === normText(e)) || normText(entry.comment || '').includes(normText(e)));
+        if (!matchedKey) continue;
+
+        const perm = extractPermanentAppearance(contentClean, permOpts);
+        if (!perm) continue;
+        const title = String(matchedKey || entry.comment || '').trim().slice(0, 20);
+        candidates.push({
+          score: 8.2 + (HAIR_TRAIT_RE.test(perm) || EYE_TRAIT_RE.test(perm) ? 1.5 : 0),
+          text: `${title ? `${title}固定外貌` : '固定外貌'}：${perm}`,
+        });
       }
 
-      // Source E: Story-based trait extraction (auto-fills appearance/outfit consistency if no plugins or sparse records)
-      const storyItems = collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, 30);
-      const pluginCount = xbxItems.length + pluginItems.length;
-      for (const si of storyItems) {
-        candidates.push({
-          score: pluginCount >= 4 ? si.score - 1.0 : si.score + 0.5,
-          text: si.text,
-        });
+      // Source D: Historical chat permanent-trait lookback (strictly permanent hair/eye/species traits, zero old outfits/locations)
+      const storyItems = collectChatStoryTraits(ctx, mesId, mesObj, curCleanText, 30, coverage, entities);
+      candidates.push(...storyItems);
+
+      // Source E (last-resort fallback): if card's own character is active and no source supplied hair/eyes,
+      // extract ONLY permanent hair/eye/species tokens from card description (NEVER scenario, NEVER outfit/location!)
+      if (candidates.length === 0) {
+        try {
+          const cardName = String(ch?.name || ctx?.name2 || '').trim();
+          const cardActive = cardName && entityList.some((e) => normText(e) === normText(cardName));
+          if (cardActive) {
+            const rawDesc = String(chData.description || ch?.description || '').trim();
+            if (rawDesc) {
+              const permDesc = extractPermanentAppearance(rawDesc, permOpts);
+              if (permDesc && (HAIR_TRAIT_RE.test(permDesc) || EYE_TRAIT_RE.test(permDesc))) {
+                candidates.push({ score: 5.5, text: `${cardName}固定外貌：${permDesc}` });
+              }
+            }
+          }
+        } catch {}
       }
     }
 
@@ -1001,10 +1194,12 @@
     const outLines = [];
     const seenOut = new Set();
     let totalLen = 0;
+    const MAX_MEMORY_CHARS = 320;
     for (const c of candidates) {
-      const sig = c.text.slice(0, 48);
-      if (seenOut.has(sig)) continue;
-      if (totalLen + c.text.length + 1 > 1650) break;
+      const sig = normText(c.text.replace(/^[^：:]+[：:]/, '')).slice(0, 40);
+      if (!sig || seenOut.has(sig)) continue;
+      if (outLines.length >= 3) break;
+      if (totalLen + c.text.length + 1 > MAX_MEMORY_CHARS) break;
       seenOut.add(sig);
       outLines.push(c.text);
       totalLen += c.text.length + 1;
@@ -2385,9 +2580,11 @@
     if (metaEl) metaEl.textContent = `第 ${overlayIndex + 1} / ${items.length} 张 · 第 ${cur.mesId} 层${engShort}`;
     if (promptEl) {
       const seedInfo = cur.meta?.seed > 0 ? `\n\nSeed: ${cur.meta.seed}` : '';
-      promptEl.textContent = cur.title
+      const promptDisplay = cur.title
         ? `Positive:\n${cur.title}${cur.negative ? `\n\nNegative:\n${cur.negative}` : ''}${seedInfo}`
         : '（未记录提示词）';
+      promptEl.value = promptDisplay;
+      promptEl.textContent = promptDisplay;
     }
     if (redrawBtn) {
       redrawBtn.dataset.mesId = String(cur.mesId);
@@ -3244,6 +3441,7 @@
 
     const rawFloor = typeof mes.mes === 'string' ? mes.mes : '';
     let cleanedFloor = cleanFloorForDistill(rawFloor, true) || rawFloor.trim();
+    const hasOriginalFloorProse = !!cleanedFloor;
     const recentContext = recentLines.join('\n');
     const charName = mes.name || getActiveCharName();
 
@@ -3326,9 +3524,10 @@
     if (regenOpts) {
       payload.regenerate = true;
       payload.force_new_seed = true;
+      payload.prefer_floor_text = hasOriginalFloorProse;
       if (Number.isFinite(prevSeed) && prevSeed > 0) payload.prev_seed = prevSeed;
       if (savedPrompt) payload.saved_prompt = savedPrompt;
-      if (savedChinesePrompt) payload.chinese_prompt = savedChinesePrompt;
+      if (savedChinesePrompt && !hasOriginalFloorProse) payload.chinese_prompt = savedChinesePrompt;
     }
 
     return {
@@ -4312,15 +4511,15 @@
               </select>
             </div>
             <div class="yiyi-field">
-              <label>全局画风偏好（可选，直接写中文如“日系二次元剧场版插画”）</label>
-              <input type="text" id="yiyi-opt-style" placeholder="留空跟随剧情，或填：日系二次元厚涂插画" />
+              <label>全局画风偏好（可选，留空完全跟随正文画风）</label>
+              <input type="text" id="yiyi-opt-style" placeholder="留空完全跟随正文，或填：电影胶片真人摄影 / 日系厚涂插画" />
             </div>
             <div class="yiyi-field">
-              <label>剧情记忆与人物一致性</label>
+              <label>剧情记忆与人物一致性（正文优先）</label>
               <select id="yiyi-opt-memory-mode">
-                <option value="smart">智能全适配 (记忆插件/世界书 + 剧情自总结)</option>
-                <option value="story_only">仅前文剧情自总结</option>
-                <option value="off">关闭记忆读取 (只看当前楼层)</option>
+                <option value="smart">智能外貌补充（仅正文未写外貌时补齐固定发色瞳色，绝不覆盖当前衣着与事件）</option>
+                <option value="story_only">仅前文固定外貌补全（不读世界书与记忆插件）</option>
+                <option value="off">纯当前楼层正文（零历史记忆）</option>
               </select>
             </div>
             <div class="yiyi-field">
@@ -4843,6 +5042,11 @@
       getDefaultEngine,
       getEngineDisplayLabel,
       getEngineShortLabel,
+      cleanFloorForDistill,
+      analyzeFloorVisualCoverage,
+      extractPermanentAppearance,
+      collectChatStoryTraits,
+      collectWorldContext,
       normalizeMediaUrl,
       generateFreshSeed,
       buildMediaEntry,
